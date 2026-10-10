@@ -26,10 +26,13 @@ def _parse_colour(text: str) -> tuple[int, int, int]:
 
 
 def _resolve_key(text: str) -> int:
-    """Turn a key name or a raw LED index into an index."""
-    key = layout.BY_NAME.get(text)
+    """Turn a key identifier or a raw LED index into an LED index."""
+    key = layout.BY_IDENT.get(text)
     if key is not None:
         return key.light_index
+    if text in layout.AMBIGUOUS:
+        options = " or ".join(layout.AMBIGUOUS[text])
+        raise ValueError(f"{text!r} matches two keys - use {options}")
     try:
         index = int(text, 0)
     except ValueError:
@@ -54,7 +57,8 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 def cmd_keys(args: argparse.Namespace) -> int:
     for k in sorted(layout.KEYS, key=lambda k: k.light_index):
-        print(f"{k.light_index:4d}  {k.name:<10s} hid={k.code:#04x}")
+        label = "" if k.ident == k.name else f'  (printed "{k.name}")'
+        print(f"{k.light_index:4d}  {k.ident:<11s} hid={k.code:#04x}{label}")
     return 0
 
 
@@ -108,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(func=cmd_raw)
 
     k = sub.add_parser("key", help="set one key to a fixed colour")
-    k.add_argument("key", help="key name (see 'keys') or a raw light index")
+    k.add_argument("key", help="key identifier (see 'keys') or a raw LED index")
     k.add_argument("colour", help="RRGGBB")
     k.set_defaults(func=cmd_key_colour)
 

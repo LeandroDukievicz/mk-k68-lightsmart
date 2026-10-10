@@ -181,13 +181,36 @@ class AnimationPayload(unittest.TestCase):
         with self.assertRaises(ValueError):
             matrix.Animation(frames=[]).payload()
 
-    def test_cache_invalidates(self):
+    def test_payload_always_reflects_current_state(self):
+        # There is deliberately no cache: every mutation below used to be
+        # able to leave a stale payload, and the worst of them (flipping
+        # `boot`) changed the header size while the cached bytes kept the
+        # old one, so the firmware would read the count at the wrong
+        # offset.
         a = matrix.Animation(frames=self._frames(2))
-        first = a.payload()
-        self.assertIs(a.payload(), first)
+        self.assertEqual(struct.unpack("<H", a.payload()[:2])[0], 2)
+
         a.frames.append(matrix.Frame())
-        a.invalidate()
         self.assertEqual(struct.unpack("<H", a.payload()[:2])[0], 3)
+        self.assertEqual(a.block_count(), len(a.payload()) // 64)
+
+        a.frames[0][(0, 0)] = 0xFF0000
+        self.assertEqual(a.payload()[2:5], bytes((0x00, 0x00, 0xFF)))
+
+        a.brightness = 10
+        self.assertEqual(a.payload()[2:5], bytes((0x00, 0x00, 0x19)))
+
+        a.boot = True
+        self.assertEqual(a.command, matrix.CMD_BOOT_ANIMATION)
+        count, speed = struct.unpack("<HH", a.payload()[:4])
+        self.assertEqual(count, 3)
+        self.assertEqual(speed, matrix.DEFAULT_SPEED)
+
+    def test_wrong_sized_pixel_array_is_caught(self):
+        a = matrix.Animation(frames=self._frames(1))
+        a.frames[0].pixels = a.frames[0].pixels[:10]
+        with self.assertRaises(ValueError):
+            a.payload()
 
 
 class Conversions(unittest.TestCase):
@@ -212,15 +235,25 @@ class KeyTable(unittest.TestCase):
         self.assertEqual(len(layout.KEYS), 69)
 
     def test_lookup_tables_cover_every_key(self):
+        # The real invariant: no key may be unreachable. Comparing
+        # len(BY_IDENT) to len(set(idents)) would be a tautology.
         self.assertEqual(len(layout.BY_LIGHT_INDEX), len(layout.KEYS))
+        self.assertEqual(len(layout.BY_IDENT), len(layout.KEYS))
 
-    def test_duplicate_names_are_disambiguated(self):
-        # Shift, Alt and Control appear twice on the board; a plain
-        # name->key dict would silently drop one of each.
+    def test_duplicate_labels_are_disambiguated(self):
+        # The vendor file prints "Shift" and "Alt" on two keys each, so
+        # keying a lookup on the printed label would lose one of each.
         names = [k.name for k in layout.KEYS]
-        for dup in ("Shift", "Alt"):
-            self.assertGreater(names.count(dup), 1)
-        self.assertEqual(len(layout.BY_NAME), len(set(names)))
+        self.assertEqual(set(layout.AMBIGUOUS), {"Shift", "Alt"})
+        for label, idents in layout.AMBIGUOUS.items():
+            self.assertGreater(names.count(label), 1)
+            for ident in idents:
+                self.assertIn(ident, layout.BY_IDENT)
+
+    def test_both_sides_of_a_duplicate_are_reachable(self):
+        left, right = layout.BY_IDENT["LeftShift"], layout.BY_IDENT["RightShift"]
+        self.assertLess(left.x, right.x)
+        self.assertNotEqual(left.light_index, right.light_index)
 
 
 class IoctlEncoding(unittest.TestCase):

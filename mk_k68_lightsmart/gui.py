@@ -115,16 +115,20 @@ class KeyboardView(QWidget):
         self.scale = scale
         self.colours: dict[int, QColor] = {}
         self.selected: kb_layout.Key | None = None
-        w, h = kb_layout.CANVAS_SIZE
-        # the layout canvas only covers the keys; the strip sits above them
-        self.setFixedSize(int(w * scale), int((h - 60) * scale))
+        w, _ = kb_layout.CANVAS_SIZE
+        # Crop to what the keys actually occupy, with a small margin. The
+        # strip is drawn separately above; a fixed crop used to cut the
+        # SWITCH key, which sits higher than the rest of the board.
+        top = kb_layout.KEYS_TOP - 8
+        bottom = max(k.y + k.h for k in kb_layout.KEYS) + 8
+        self.setFixedSize(int(w * scale), int((bottom - top) * scale))
         self.setMouseTracking(True)
         self._hover: kb_layout.Key | None = None
 
         # Geometry and font never change, so build them once instead of
         # on every repaint and every mouse move.
         self._rects: dict[int, QRectF] = {
-            k.light_index: QRectF(k.x * scale, (k.y - 60) * scale,
+            k.light_index: QRectF(k.x * scale, (k.y - top) * scale,
                                   k.w * scale, k.h * scale)
             for k in kb_layout.KEYS
         }
@@ -200,6 +204,17 @@ class SidebarButton(QPushButton):
         self.glyph = glyph
         self.caption = caption
         self.setFlat(True)
+        # paintEvent reads underMouse(), so the hover state has to trigger
+        # a repaint of its own
+        self.setAttribute(Qt.WA_Hover, True)
+
+    def enterEvent(self, event) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)

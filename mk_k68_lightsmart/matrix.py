@@ -19,7 +19,10 @@ pre-scaled by the layer's brightness.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import struct
+import urllib.parse
 import sys
 from array import array
 from collections.abc import Sequence
@@ -43,6 +46,10 @@ DEFAULT_SPEED = 0x50
 SPEED_BASE = 0x66
 
 BLOCK = 64
+
+# The fast encode path reads an array("I") as four bytes per pixel.
+assert array("I").itemsize == 4, "this build's array('I') is not 32-bit"
+
 
 
 def led_index(col: int, row: int) -> int:
@@ -90,7 +97,7 @@ class Frame:
         else:
             if len(pixels) != LEDS:
                 raise ValueError(f"a frame holds {LEDS} pixels, got {len(pixels)}")
-            self.pixels = array("I", pixels)
+            self.pixels = array("I", [p & 0xFFFFFF for p in pixels])
 
     def __setitem__(self, pos: tuple[int, int], rgb: int) -> None:
         self.pixels[led_index(*pos)] = rgb & 0xFFFFFF
@@ -127,7 +134,9 @@ class Frame:
 
         if brightness == 255:
             return bytes(raw)
-        return bytes(raw.translate(_brightness_lut(brightness)))
+        # bytes().translate returns bytes directly; bytearray().translate
+        # would hand back a bytearray we would then have to copy again.
+        return bytes(raw).translate(_brightness_lut(brightness))
 
 
 def brightness_to_byte(percent: int) -> int:
@@ -150,15 +159,10 @@ class Animation:
     speed: int | None = None
     brightness: int = 100
     boot: bool = False
-    _payload: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def max_frames(self) -> int:
         return MAX_FRAMES_BOOT if self.boot else MAX_FRAMES_ANIMATION
-
-    def invalidate(self) -> None:
-        """Drop the cached payload after editing frames or settings."""
-        self._payload = None
 
     def payload(self) -> bytes:
         """Build the bulk payload: header, frames, then the AA 55 magic.
@@ -166,9 +170,6 @@ class Animation:
         The result is padded out to whole 64-byte blocks, which is what
         the announce command counts.
         """
-        if self._payload is not None:
-            return self._payload
-
         frames = self.frames[: self.max_frames]
         if not frames:
             raise ValueError("an animation needs at least one frame")
@@ -183,6 +184,12 @@ class Animation:
 
         bright = brightness_to_byte(self.brightness)
         body = b"".join(f.encode(bright) for f in frames)
+        if len(body) != count * FRAME_BYTES:
+            raise ValueError(
+                f"frames encoded to {len(body)} bytes, expected "
+                f"{count * FRAME_BYTES} -- a Frame's pixel array is the "
+                "wrong length"
+            )
         data = header + body
         end = len(data)
 
@@ -196,8 +203,7 @@ class Animation:
         # payload a non-multiple of 64 and truncating the terminator.
         buf[end + 1] = 0xAA
         buf[end + 2] = 0x55
-        self._payload = bytes(buf)
-        return self._payload
+        return bytes(buf)
 
     @staticmethod
     def _blocks_for(data_len: int) -> int:
@@ -217,17 +223,26 @@ class Animation:
     def block_count(self) -> int:
         """How many 64-byte blocks the upload will announce and send.
 
-        Derived arithmetically so it never re-encodes the frames.
+        Deliberately derived from the real payload rather than recomputed,
+        so this can never disagree with what actually goes on the wire.
         """
-        n = min(len(self.frames), self.max_frames)
-        if n == 0:
-            raise ValueError("an animation needs at least one frame")
-        header = 4 if self.boot else 2
-        return self._blocks_for(header + n * FRAME_BYTES)
+        return len(self.payload()) // BLOCK
 
     @property
     def command(self) -> int:
         return CMD_BOOT_ANIMATION if self.boot else CMD_ANIMATION
+
+
+# Table names are fixed here rather than interpolated, so the query text is
+# never built from anything outside this module.
+_FRAMES_LIVE = (
+    "SELECT frameIndex, led_index, rgb_value FROM t_led_frames "
+    "WHERE layer_id=? ORDER BY frameIndex, led_index"
+)
+_FRAMES_DEFAULT = (
+    "SELECT frameIndex, led_index, rgb_value FROM t_default_led_frames "
+    "WHERE layer_id=? ORDER BY frameIndex, led_index"
+)
 
 
 def load_vendor_animations(db_path: str) -> dict[int, tuple[str, Animation]]:
@@ -238,31 +253,38 @@ def load_vendor_animations(db_path: str) -> dict[int, tuple[str, Animation]]:
     """
     import sqlite3
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # A path is not a URI: "?" or "#" in it would otherwise be read as URI
+    # syntax and could override mode=ro.
+    uri = "file:" + urllib.parse.quote(os.path.abspath(db_path)) + "?mode=ro"
     out: dict[int, tuple[str, Animation]] = {}
-    layers = con.execute(
-        "SELECT led_id, name, speed, brightness FROM t_ledlayer_data"
-    ).fetchall()
-    for led_id, name, speed, brightness in layers:
-        for table in ("t_default_led_frames", "t_led_frames"):
-            rows = con.execute(
-                f"SELECT frameIndex, led_index, rgb_value FROM {table} "
-                "WHERE layer_id=? ORDER BY frameIndex, led_index",
-                (led_id,),
-            ).fetchall()
-            if not rows:
-                continue
-            by_frame: dict[int, Frame] = {}
-            for frame_index, index, rgb in rows:
-                by_frame.setdefault(frame_index, Frame())
-                by_frame[frame_index].pixels[index] = rgb
-            anim = Animation(
-                frames=[by_frame[k] for k in sorted(by_frame)],
-                speed=speed,
-                brightness=brightness,
-                boot=(led_id == 1),
-            )
-            out[led_id] = (name, anim)
-            break
-    con.close()
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as con:
+        layers = con.execute(
+            "SELECT led_id, name, speed, brightness FROM t_ledlayer_data"
+        ).fetchall()
+        for led_id, name, speed, brightness in layers:
+            # Live frames win over the shipped defaults; a layer can appear
+            # in both. (The vendor never states the precedence -- this is
+            # what the table names imply.)
+            for query in (_FRAMES_LIVE, _FRAMES_DEFAULT):
+                rows = con.execute(query, (led_id,)).fetchall()
+                if not rows:
+                    continue
+                by_frame: dict[int, Frame] = {}
+                for frame_index, index, rgb in rows:
+                    if not 0 <= index < LEDS:
+                        raise ValueError(
+                            f"layer {led_id} frame {frame_index}: led_index "
+                            f"{index} is outside 0..{LEDS - 1}"
+                        )
+                    frame = by_frame.get(frame_index)
+                    if frame is None:
+                        frame = by_frame[frame_index] = Frame()
+                    frame.pixels[index] = rgb & 0xFFFFFF
+                out[led_id] = (name, Animation(
+                    frames=[by_frame[k] for k in sorted(by_frame)],
+                    speed=speed,
+                    brightness=brightness,
+                    boot=(led_id == 1),
+                ))
+                break
     return out
