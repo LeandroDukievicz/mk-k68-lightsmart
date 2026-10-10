@@ -1,16 +1,28 @@
 [build-system]
-requires = ["setuptools>=68"]
+# PEP 639 SPDX license expressions need setuptools 77 or newer.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mk-k68-lightsmart"
 version = "0.1.0"
 description = "RGB and dot-matrix control for the 68-key LightSmart keyboard"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
+# PySide6-Essentials, not the PySide6 meta-package: the latter pulls in
+# Addons (QtWebEngine, Qt3D, Multimedia) and roughly a gigabyte with it.
+dependencies = ["PySide6-Essentials>=6.5"]
+
+[project.urls]
+Homepage = "https://github.com/LeandroDukievicz/mk-k68-lightsmart"
+Issues = "https://github.com/LeandroDukievicz/mk-k68-lightsmart/issues"
 
 [project.scripts]
 mk-k68-lightsmart = "mk_k68_lightsmart.cli:main"
+
+[project.gui-scripts]
+mk-k68-lightsmart-gui = "mk_k68_lightsmart.gui:main"
 
 [tool.setuptools]
 packages = ["mk_k68_lightsmart"]

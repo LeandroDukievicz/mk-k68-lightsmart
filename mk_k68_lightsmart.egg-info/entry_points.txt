@@ -1,2 +1,5 @@
 [console_scripts]
 mk-k68-lightsmart = mk_k68_lightsmart.cli:main
+
+[gui_scripts]
+mk-k68-lightsmart-gui = mk_k68_lightsmart.gui:main

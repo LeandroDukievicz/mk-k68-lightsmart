@@ -576,8 +576,12 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
-    app = QApplication(argv or sys.argv)
+    app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("MK-K68-LightSmart")
+    app.setApplicationDisplayName("MK-K68-LightSmart")
+    # Wayland matches a window to its icon through the desktop file name,
+    # so without this the dock shows a generic icon.
+    app.setDesktopFileName("mk-k68-lightsmart")
     win = MainWindow()
     win.show()
     return app.exec()

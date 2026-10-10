@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MK-K68-LightSmart
+GenericName=Keyboard lighting
+Comment=RGB and dot-matrix control for a 68-key keyboard
+Exec=mk-k68-lightsmart.gui
+Icon=${SNAP}/meta/gui/mk-k68-lightsmart.png
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=keyboard;rgb;led;backlight;
+StartupWMClass=mk-k68-lightsmart

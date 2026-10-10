@@ -14,15 +14,29 @@ description: |
     * per-key RGB colours and the built-in lighting animations
     * dot-matrix strip: brightness and frame animations
     * key remapping and macros
-    * live CPU / GPU / network / clock widgets on the strip
 
   The keyboard must be connected by cable, with its switch in wired mode;
   the vendor interface is not exposed over the wireless link.
 
-  Needs direct access to the keyboard's /dev/hidraw node. On classic
-  desktops no snap interface grants that -- the hidraw interface is only
-  slotted by gadget snaps on Ubuntu Core -- which is why this snap is
-  built classic. See docs/PACKAGING.md for the alternatives.
+  Access to the keyboard needs a udev rule, which a snap cannot install
+  for you. A copy ships at:
+
+    /snap/mk-k68-lightsmart/current/udev/60-mk-k68-lightsmart.rules
+
+  Copy it to /etc/udev/rules.d/, then reload with `udevadm control
+  --reload-rules` and `udevadm trigger --action=add
+  --subsystem-match=hidraw`. The rule is deliberately scoped to the
+  keyboard's vendor interface: the other two carry the keys you type.
+
+  Built classic because on a desktop no snap interface grants access to
+  a /dev/hidraw node -- snapd's hidraw interface is only slotted by
+  gadget snaps. The app opens nothing else.
+
+license: GPL-3.0-or-later
+contact: https://github.com/LeandroDukievicz/mk-k68-lightsmart/issues
+issues: https://github.com/LeandroDukievicz/mk-k68-lightsmart/issues
+source-code: https://github.com/LeandroDukievicz/mk-k68-lightsmart
+icon: snap/gui/mk-k68-lightsmart.png
 
 confinement: classic
 grade: devel
@@ -34,13 +48,32 @@ platforms:
 apps:
   mk-k68-lightsmart:
     command: bin/mk-k68-lightsmart
-    environment:
-      PYTHONPATH: $SNAP/lib/python3.12/site-packages
+  gui:
+    command: bin/mk-k68-lightsmart-gui
+    desktop: usr/share/applications/mk-k68-lightsmart.desktop
 
 parts:
   tool:
     plugin: python
     source: .
-    python-requirements: []
+    # A classic snap gets no system interpreter from snapcraft, so the
+    # part must provision its own or the build stops at
+    # "No suitable Python interpreter found".
     stage-packages:
-      - libudev1
+      - python3.12-minimal
+      - libpython3.12-minimal
+      - libpython3.12-stdlib
+    # Classic snaps are not relocated unless this is set, so the staged
+    # interpreter and Qt's shared objects would keep build-time rpaths.
+    build-attributes:
+      - enable-patchelf
+
+  integration:
+    plugin: dump
+    source: .
+    organize:
+      snap/gui/mk-k68-lightsmart.desktop: usr/share/applications/mk-k68-lightsmart.desktop
+      udev/60-mk-k68-lightsmart.rules: udev/60-mk-k68-lightsmart.rules
+    stage:
+      - usr/share/applications/mk-k68-lightsmart.desktop
+      - udev/60-mk-k68-lightsmart.rules

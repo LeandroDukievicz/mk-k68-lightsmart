@@ -21,9 +21,11 @@ the wire: a leading 0x00 followed by the 64 payload bytes.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import glob
 import os
+import struct
 import time
 
 VENDOR_ID = 0x05AC          # the keyboard borrows Apple's vendor id
@@ -56,12 +58,38 @@ def _hidiocgfeature(size: int) -> int:
     return _ioc(3, ord("H"), 0x07, size)
 
 
+#: HIDIOCGRAWINFO -- struct hidraw_devinfo { __u32 bustype; __s16 vendor,
+#: product; }. Used to re-check the device once it is open.
+_HIDIOCGRAWINFO = _ioc(2, ord("H"), 0x03, 8)
+#: HIDIOCGRDESCSIZE / HIDIOCGRDESC -- the report descriptor, read off the
+#: open descriptor rather than from sysfs.
+_HIDIOCGRDESCSIZE = _ioc(2, ord("H"), 0x01, 4)
+_HID_MAX_DESCRIPTOR_SIZE = 4096
+_HIDIOCGRDESC = _ioc(2, ord("H"), 0x02, 4 + _HID_MAX_DESCRIPTOR_SIZE)
+
+
 class DeviceNotFound(Exception):
     """No KT68 vendor control interface is present."""
 
 
 class TransportError(Exception):
     """A transfer failed or the keyboard reported an error."""
+
+
+class DeviceGone(TransportError):
+    """The device stopped answering -- unplugged, or reset.
+
+    Distinct from a plain :class:`TransportError` because a protocol
+    rejection means "try something else" while this means "the handle is
+    dead, reconnect".
+    """
+
+
+#: Errnos that mean the device itself is gone, not that the command was bad.
+_GONE = frozenset((
+    errno.ENODEV, errno.ENXIO, errno.EIO, errno.ESHUTDOWN,
+    errno.EBADF, errno.ENOENT, errno.EPIPE,
+))
 
 
 def _read_sysfs(path: str) -> str:
@@ -180,6 +208,63 @@ class KT68Transport:
         except OSError as exc:
             raise TransportError(f"cannot open {self.path}: {exc}") from exc
 
+        # find_control_device() picked this path by reading sysfs; the open
+        # is a separate step, and hidraw minor numbers are reused when a
+        # device is replugged. Confirm on the descriptor itself, so we can
+        # never write vendor commands into some other HID device.
+        try:
+            self._verify_identity()
+        except Exception:
+            self.close()
+            raise
+
+    def _verify_identity(self) -> None:
+        info = bytearray(8)
+        try:
+            fcntl.ioctl(self._fd, _HIDIOCGRAWINFO, info)
+        except OSError as exc:
+            raise TransportError(
+                f"cannot identify {self.path}: {exc}"
+            ) from exc
+        _bustype, vendor, product = struct.unpack("=Ihh", bytes(info))
+        vendor &= 0xFFFF
+        product &= 0xFFFF
+        if (vendor, product) != (VENDOR_ID, PRODUCT_ID):
+            raise TransportError(
+                f"{self.path} is {vendor:04x}:{product:04x}, not the expected "
+                f"{VENDOR_ID:04x}:{PRODUCT_ID:04x} -- the device was probably "
+                "replugged while we were looking at it"
+            )
+
+        # Same vendor id is not enough: the keyboard's typing interfaces
+        # share it. Check the collection this descriptor actually speaks.
+        ident = self._read_usage()
+        if ident != (VENDOR_USAGE_PAGE, VENDOR_USAGE):
+            got = "undecodable" if ident is None else (
+                f"usage page {ident[0]:#06x}/{ident[1]:#06x}"
+            )
+            raise TransportError(
+                f"{self.path} is the right device but the wrong interface "
+                f"({got}, want {VENDOR_USAGE_PAGE:#06x}/{VENDOR_USAGE:#06x})"
+            )
+
+    def _read_usage(self) -> tuple[int, int] | None:
+        """Parse the report descriptor straight off the open descriptor."""
+        try:
+            size_buf = bytearray(4)
+            fcntl.ioctl(self._fd, _HIDIOCGRDESCSIZE, size_buf)
+            size = struct.unpack("=I", bytes(size_buf))[0]
+            if not 0 < size <= _HID_MAX_DESCRIPTOR_SIZE:
+                return None
+            desc = bytearray(4 + _HID_MAX_DESCRIPTOR_SIZE)
+            desc[0:4] = struct.pack("=I", size)
+            fcntl.ioctl(self._fd, _HIDIOCGRDESC, desc)
+        except OSError as exc:
+            raise TransportError(
+                f"cannot read the report descriptor of {self.path}: {exc}"
+            ) from exc
+        return _parse_report_descriptor(bytes(desc[4 : 4 + size]))
+
     # -- context manager ------------------------------------------------
     def __enter__(self) -> "KT68Transport":
         return self
@@ -208,20 +293,20 @@ class KT68Transport:
         if len(payload) > REPORT_SIZE:
             raise ValueError(f"payload is {len(payload)} bytes, max {REPORT_SIZE}")
         fd = self._check_open()
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            payload = bytes(payload)
         buf = self._tx
         buf[0] = 0  # the device declares no report id
         buf[1 : 1 + len(payload)] = payload
         if len(payload) < REPORT_SIZE:
             # clear whatever the previous transfer left in the tail
             buf[1 + len(payload) :] = bytes(REPORT_SIZE - len(payload))
+        assert len(buf) == WIRE_SIZE, "wire buffer changed length"
         time.sleep(self.pacing)
         try:
             fcntl.ioctl(fd, self._set_req, buf)
         except OSError as exc:
-            raise TransportError(
-                f"write to {self.path} failed: {exc} "
-                "(was the keyboard unplugged?)"
-            ) from exc
+            raise self._io_error("write to", exc) from exc
 
     def get_feature(self) -> bytes:
         """Read one 64-byte feature report back from the keyboard."""
@@ -232,11 +317,23 @@ class KT68Transport:
         try:
             fcntl.ioctl(fd, self._get_req, buf)
         except OSError as exc:
-            raise TransportError(
-                f"read from {self.path} failed: {exc} "
-                "(was the keyboard unplugged?)"
-            ) from exc
+            raise self._io_error("read from", exc) from exc
         return bytes(buf[1:])
+
+    def _io_error(self, what: str, exc: OSError) -> TransportError:
+        """Turn an ioctl failure into the right exception.
+
+        When the errno says the device is gone the handle is closed here,
+        so ``closed`` means what callers assume it means and a stale fd is
+        not kept alive for the rest of the session.
+        """
+        if exc.errno in _GONE:
+            self.close()
+            return DeviceGone(
+                f"{what} {self.path} failed: {exc} -- the keyboard is no "
+                "longer there"
+            )
+        return TransportError(f"{what} {self.path} failed: {exc}")
 
     def send_bulk(self, payload: bytes) -> int:
         """Send a payload longer than one report, 64 bytes at a time.

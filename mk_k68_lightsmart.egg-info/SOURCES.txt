@@ -11,5 +11,6 @@ mk_k68_lightsmart.egg-info/PKG-INFO
 mk_k68_lightsmart.egg-info/SOURCES.txt
 mk_k68_lightsmart.egg-info/dependency_links.txt
 mk_k68_lightsmart.egg-info/entry_points.txt
+mk_k68_lightsmart.egg-info/requires.txt
 mk_k68_lightsmart.egg-info/top_level.txt
 tests/test_protocol.py

@@ -271,6 +271,15 @@ def load_vendor_animations(db_path: str) -> dict[int, tuple[str, Animation]]:
                     continue
                 by_frame: dict[int, Frame] = {}
                 for frame_index, index, rgb in rows:
+                    try:
+                        frame_index = int(frame_index)
+                        index = int(index)
+                        rgb = int(rgb)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"layer {led_id}: {db_path} is not a valid "
+                            "animation store (non-numeric frame data)"
+                        ) from None
                     if not 0 <= index < LEDS:
                         raise ValueError(
                             f"layer {led_id} frame {frame_index}: led_index "
@@ -278,6 +287,14 @@ def load_vendor_animations(db_path: str) -> dict[int, tuple[str, Animation]]:
                         )
                     frame = by_frame.get(frame_index)
                     if frame is None:
+                        # Anything past the cap is discarded by payload()
+                        # anyway; refusing here stops a malformed file from
+                        # making us allocate gigabytes first.
+                        if len(by_frame) >= MAX_FRAMES_ANIMATION:
+                            raise ValueError(
+                                f"layer {led_id} has more than "
+                                f"{MAX_FRAMES_ANIMATION} frames"
+                            )
                         frame = by_frame[frame_index] = Frame()
                     frame.pixels[index] = rgb & 0xFFFFFF
                 out[led_id] = (name, Animation(
