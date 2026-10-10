@@ -1,0 +1,46 @@
+name: mk-k68-lightsmart
+title: MK-K68-LightSmart
+base: core24
+version: '0.1.0'
+summary: RGB and dot-matrix control for the 68-key LightSmart keyboard
+description: |
+  Control panel for 68-key mechanical keyboards that carry a 65x5
+  dot-matrix LED strip above the function row -- the hardware whose
+  vendor software only ships for Windows.
+
+  Speaks the keyboard's own vendor HID protocol, so no firmware change is
+  involved:
+
+    * per-key RGB colours and the built-in lighting animations
+    * dot-matrix strip: brightness and frame animations
+    * key remapping and macros
+    * live CPU / GPU / network / clock widgets on the strip
+
+  The keyboard must be connected by cable, with its switch in wired mode;
+  the vendor interface is not exposed over the wireless link.
+
+  Needs direct access to the keyboard's /dev/hidraw node. On classic
+  desktops no snap interface grants that -- the hidraw interface is only
+  slotted by gadget snaps on Ubuntu Core -- which is why this snap is
+  built classic. See docs/PACKAGING.md for the alternatives.
+
+confinement: classic
+grade: devel
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  mk-k68-lightsmart:
+    command: bin/mk-k68-lightsmart
+    environment:
+      PYTHONPATH: $SNAP/lib/python3.12/site-packages
+
+parts:
+  tool:
+    plugin: python
+    source: .
+    python-requirements: []
+    stage-packages:
+      - libudev1

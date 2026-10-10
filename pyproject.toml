@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mk-k68-lightsmart"
+version = "0.1.0"
+description = "RGB and dot-matrix control for the 68-key LightSmart keyboard"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+
+[project.scripts]
+mk-k68-lightsmart = "mk_k68_lightsmart.cli:main"
+
+[tool.setuptools]
+packages = ["mk_k68_lightsmart"]

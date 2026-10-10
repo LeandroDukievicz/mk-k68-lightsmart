@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+/parts/
+/prime/
+/stage/
+*.snap
+/reference/

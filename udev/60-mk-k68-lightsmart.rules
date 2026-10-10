@@ -1,0 +1,12 @@
+# MK-K68-LightSmart -- access to the 68-key board's vendor HID interface.
+#
+# The keyboard presents three HID interfaces; only the vendor one
+# (usage page 0xFF13, interface 2) carries configuration traffic. Tagging
+# it uaccess hands it to the logged-in user, so the tool needs no root.
+#
+# The file must sort before 70-uaccess.rules, hence the 60- prefix.
+#
+# Install:  sudo cp 60-mk-k68-lightsmart.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="024f", TAG+="uaccess"
