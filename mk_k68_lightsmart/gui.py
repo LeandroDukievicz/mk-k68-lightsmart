@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from . import layout as kb_layout
 from . import protocol
-from .transport import DeviceNotFound, TransportError
+from .transport import DeviceGone, DeviceNotFound, TransportError
 
 # -- palette, sampled from the vendor screenshots -----------------------
 BG = QColor("#050b24")
@@ -112,7 +112,6 @@ class KeyboardView(QWidget):
 
     def __init__(self, scale: float = 1.18, parent: QWidget | None = None):
         super().__init__(parent)
-        self.scale = scale
         self.colours: dict[int, QColor] = {}
         self.selected: kb_layout.Key | None = None
         w, _ = kb_layout.CANVAS_SIZE
@@ -134,9 +133,6 @@ class KeyboardView(QWidget):
         }
         self._font = QFont()
         self._font.setPointSizeF(7.5)
-
-    def _rect(self, key: kb_layout.Key) -> QRectF:
-        return self._rects[key.light_index]
 
     def key_at(self, pos: QPointF) -> kb_layout.Key | None:
         for key in kb_layout.KEYS:
@@ -241,8 +237,11 @@ class Card(QFrame):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self.setObjectName("card")
+        # Scoped by object name: a bare "QFrame { ... }" also matches every
+        # child QLabel, which derives from QFrame.
         self.setStyleSheet(
-            "QFrame { background: rgba(8,28,60,120);"
+            "QFrame#card { background: rgba(8,28,60,120);"
             " border: 1px solid #0d3a6b; border-radius: 6px; }"
         )
 
@@ -407,7 +406,7 @@ class MainWindow(QMainWindow):
 
         def label(text: str) -> QLabel:
             lb = QLabel(text)
-            lb.setStyleSheet(f"color: {MUTED.name()}; border: none; font-size: 11px;")
+            lb.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
             return lb
 
         lay.addWidget(label("Colour"))
@@ -512,31 +511,44 @@ class MainWindow(QMainWindow):
         self.status.setText(text)
         self.status.setStyleSheet(f"color: {colour}; font-size: 11px;")
 
-    def _send(self, what: str, fn) -> None:
+    def _send(self, what: str, fn) -> bool:
+        """Run a device call, reporting the outcome. True if it landed."""
         if self.kb is None:
-            self.set_status("no keyboard — plug it in by cable, wired mode", ok=False)
-            return
+            self.set_status(
+                "no keyboard — plug it in by cable, wired mode, "
+                "then press Setup",
+                ok=False,
+            )
+            return False
         try:
             fn()
+        except DeviceGone as exc:
+            # The transport already closed itself; drop the handle so the
+            # next attempt -- or the Setup button -- can reconnect.
+            self.kb = None
+            self.set_status(f"{exc}. Press Setup to look again.", ok=False)
+            return False
         except TransportError as exc:
             self.set_status(f"{what} failed: {exc}", ok=False)
-            if self.kb is not None and self.kb.t.closed:
-                self.kb = None
-        else:
-            self.set_status(f"{what} sent", ok=True)
+            return False
+        self.set_status(f"{what} sent", ok=True)
+        return True
 
     def on_key(self, key: kb_layout.Key) -> None:
-        self.keyboard.colours[key.light_index] = QColor(self.colour)
-        self.keyboard.update()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             protocol.MODE_SINGLE_KEY, rgb, p8=key.light_index, p10=0x0F, p11=0x0F
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
-        self._send(
-            f"{key.name} → {self.colour.name()}",
+        # Paint only once the keyboard has taken it, so the picture cannot
+        # claim a colour the hardware never got.
+        landed = self._send(
+            f"{key.ident} → {self.colour.name()}",
             lambda: self.kb.set_key_colour(key.light_index, rgb),
         )
+        if landed:
+            self.keyboard.colours[key.light_index] = QColor(self.colour)
+            self.keyboard.update()
 
     def on_pixel(self, col: int, row: int) -> None:
         self.strip.pixels[(col, row)] = QColor(self.colour)

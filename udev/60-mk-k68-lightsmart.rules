@@ -1,12 +1,25 @@
 # MK-K68-LightSmart -- access to the 68-key board's vendor HID interface.
 #
-# The keyboard presents three HID interfaces; only the vendor one
-# (usage page 0xFF13, interface 2) carries configuration traffic. Tagging
-# it uaccess hands it to the logged-in user, so the tool needs no root.
+# The keyboard presents three HID interfaces. Only interface 2 (usage page
+# 0xFF13) carries configuration traffic; interfaces 0 and 1 carry the keys
+# you type. The DEVPATH match pins the rule to interface 2 so the typing
+# interfaces are NOT handed to the session -- without it, any process
+# running as the logged-in user could read raw keystrokes straight off the
+# device. That matters doubly here: this keyboard reports Apple's
+# 05ac:024f, so a broad rule would also expose a genuine Apple keyboard on
+# the same machine.
 #
-# The file must sort before 70-uaccess.rules, hence the 60- prefix.
+# ATTRS{bInterfaceNumber} cannot be used alongside ATTRS{idVendor}: udev
+# requires all ATTRS matches to land on the same parent device, and those
+# two live on different ones. DEVPATH is an event key, so it composes.
+# ":1.2" is bConfigurationValue 1, bInterfaceNumber 2.
+#
+# The file must sort before 70-uaccess.rules, hence the 60- prefix:
+# uaccess is applied by a builtin that rule invokes, so a tag set later
+# never takes effect.
 #
 # Install:  sudo cp 60-mk-k68-lightsmart.rules /etc/udev/rules.d/
-#           sudo udevadm control --reload-rules && sudo udevadm trigger
+#           sudo udevadm control --reload-rules
+#           sudo udevadm trigger --action=add --subsystem-match=hidraw
 #
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="024f", TAG+="uaccess"
+ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="024f", DEVPATH=="*:1.2/*", TAG+="uaccess"

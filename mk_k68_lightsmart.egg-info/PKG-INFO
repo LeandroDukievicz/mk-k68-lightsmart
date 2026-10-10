@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: mk-k68-lightsmart
+Version: 0.1.0
+Summary: RGB and dot-matrix control for the 68-key LightSmart keyboard
+License-Expression: GPL-3.0-or-later
+Requires-Python: >=3.10

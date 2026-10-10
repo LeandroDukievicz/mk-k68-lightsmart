@@ -6,11 +6,14 @@ The tool needs read/write access to the keyboard's `/dev/hidraw` node.
 On a **classic** desktop no snap interface grants that:
 
 ```
-$ snap interfaces | grep -E 'hidraw|raw-usb'
-:hardware-observe
-:hardware-random-control
-:hardware-random-observe
-:raw-usb
+$ snap interface hidraw
+name:          hidraw
+summary:       allows access to specific hidraw device
+documentation: https://snapcraft.io/docs/hidraw-interface
+          <- no "slots:" section: nothing on this system provides one
+
+$ snap interfaces | grep -c hidraw
+0
 ```
 
 There is no `:hidraw` system slot. snapd's `hidraw` interface declares

@@ -38,18 +38,19 @@ first two; all configuration goes through the third:
 
 ## Status
 
-The transport is complete and proven against real hardware. The UI is
-one screen in; the rest is scaffolded.
+The transport is complete, and the per-key colour path is confirmed on
+real hardware. The bulk upload is implemented and tested against the
+encoder, but has never run on a device. The UI is one screen in.
 
 | Area | State |
 |---|---|
-| Device discovery by usage page | ✅ done |
+| Device discovery by usage page, re-checked on the open fd | ✅ done |
 | Feature-report transport, 15 ms pacing, ack handling | ✅ done |
 | Transaction envelope | ✅ done |
 | Key table, all 69 LED indices | ✅ done |
 | Per-key colour | ✅ implemented, confirmed on hardware |
 | Built-in animations | ⚠️ framing right, some effect ids still wrong |
-| Dot-matrix frame upload | ⚠️ format decoded, not yet confirmed on hardware |
+| Dot-matrix frame upload | ⚠️ decoded and encoded; never yet run on a device |
 | Dot-matrix editor UI | 🚧 draws and paints, upload not wired |
 | Key remapping, macros | 🔍 opcodes located, payloads not decoded |
 | Music-reactive, settings screens | ⬜ not started |
@@ -72,8 +73,22 @@ The `60-` prefix is load-bearing. The rule tags the device `uaccess`,
 and the builtin that acts on that tag runs from `70-uaccess.rules` — a
 `99-` rule would sort *after* it and never take effect.
 
-The rule is scoped to this one vendor/product id, and hands the device
-to whoever is logged in at the seat rather than making it world-writable.
+The rule is scoped to **interface 2 alone**. That matters: interfaces 0
+and 1 are the ones that carry the keys you type, so a rule matching only
+vendor/product would hand every keystroke to any process running as the
+logged-in user. This keyboard also reports Apple's `05ac:024f`, so a
+broad rule would expose a genuine Apple keyboard on the same machine.
+
+`ATTRS{bInterfaceNumber}` cannot be combined with `ATTRS{idVendor}` --
+udev requires all `ATTRS` matches to land on the same parent device, and
+those two live on different ones -- so the rule pins the interface with
+`DEVPATH`. To check it took effect:
+
+```sh
+for n in /dev/hidraw*; do printf '%s ' "$n"; getfacl -p "$n" | grep -c "^user:$USER:"; done
+```
+
+Only the vendor interface should report `1`.
 
 ### 2. Dependencies
 
@@ -228,11 +243,14 @@ The short version: on a classic desktop **no snap interface grants
 gadget snaps, i.e. Ubuntu Core:
 
 ```
-$ snap interfaces | grep -E 'hidraw|raw-usb'
-:hardware-observe
-:hardware-random-control
-:hardware-random-observe
-:raw-usb
+$ snap interface hidraw
+name:          hidraw
+summary:       allows access to specific hidraw device
+documentation: https://snapcraft.io/docs/hidraw-interface
+          <- no "slots:" section: nothing on this system provides one
+
+$ snap interfaces | grep -c hidraw
+0
 ```
 
 So the snap is built **classic**, which needs manual store review. The
