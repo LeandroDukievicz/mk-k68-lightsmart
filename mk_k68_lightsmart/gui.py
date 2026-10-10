@@ -66,6 +66,17 @@ class DotMatrixStrip(QWidget):
         self.setFixedSize(MATRIX_COLS * cell + 8, MATRIX_ROWS * cell + 8)
         self.setCursor(Qt.CrossCursor)
 
+        # 325 cells get repainted on every stroke, so the rects and the
+        # unlit pens are built once rather than per frame.
+        self._cells = [
+            (col, row, QRectF(4 + col * cell, 4 + row * cell, cell - 2, cell - 2))
+            for row in range(MATRIX_ROWS)
+            for col in range(MATRIX_COLS)
+        ]
+        self._off_brush = QBrush(QColor("#0b0f1c"))
+        self._off_pen = QPen(QColor("#141a2c"), 1)
+        self._bg = QColor("#02060f")
+
     def clear(self) -> None:
         self.pixels.clear()
         self.update()
@@ -73,19 +84,17 @@ class DotMatrixStrip(QWidget):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor("#02060f"))
-        for row in range(MATRIX_ROWS):
-            for col in range(MATRIX_COLS):
-                r = QRectF(4 + col * self.cell, 4 + row * self.cell,
-                           self.cell - 2, self.cell - 2)
-                colour = self.pixels.get((col, row))
-                if colour is None:
-                    p.setBrush(QColor("#0b0f1c"))
-                    p.setPen(QPen(QColor("#141a2c"), 1))
-                else:
-                    p.setBrush(colour)
-                    p.setPen(QPen(colour.lighter(140), 1))
-                p.drawRoundedRect(r, 2, 2)
+        p.fillRect(self.rect(), self._bg)
+        lit = self.pixels
+        for col, row, r in self._cells:
+            colour = lit.get((col, row))
+            if colour is None:
+                p.setBrush(self._off_brush)
+                p.setPen(self._off_pen)
+            else:
+                p.setBrush(colour)
+                p.setPen(QPen(colour.lighter(140), 1))
+            p.drawRoundedRect(r, 2, 2)
 
     def mousePressEvent(self, event) -> None:
         col = int((event.position().x() - 4) // self.cell)
@@ -114,13 +123,22 @@ class KeyboardView(QWidget):
         self.setMouseTracking(True)
         self._hover: kb_layout.Key | None = None
 
+        # Geometry and font never change, so build them once instead of
+        # on every repaint and every mouse move.
+        self._rects: dict[int, QRectF] = {
+            k.light_index: QRectF(k.x * scale, (k.y - 60) * scale,
+                                  k.w * scale, k.h * scale)
+            for k in kb_layout.KEYS
+        }
+        self._font = QFont()
+        self._font.setPointSizeF(7.5)
+
     def _rect(self, key: kb_layout.Key) -> QRectF:
-        s = self.scale
-        return QRectF(key.x * s, (key.y - 60) * s, key.w * s, key.h * s)
+        return self._rects[key.light_index]
 
     def key_at(self, pos: QPointF) -> kb_layout.Key | None:
         for key in kb_layout.KEYS:
-            if self._rect(key).contains(pos):
+            if self._rects[key.light_index].contains(pos):
                 return key
         return None
 
@@ -128,13 +146,10 @@ class KeyboardView(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor("#0a1024"))
-
-        font = QFont()
-        font.setPointSizeF(7.5)
-        p.setFont(font)
+        p.setFont(self._font)
 
         for key in kb_layout.KEYS:
-            r = self._rect(key)
+            r = self._rects[key.light_index]
             colour = self.colours.get(key.light_index)
             if colour is not None:
                 grad = QLinearGradient(r.topLeft(), r.bottomLeft())

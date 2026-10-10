@@ -20,6 +20,9 @@ pre-scaled by the layer's brightness.
 from __future__ import annotations
 
 import struct
+import sys
+from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 COLS = 65
@@ -56,24 +59,47 @@ def led_position(index: int) -> tuple[int, int]:
     return index % COLS, index // COLS
 
 
-@dataclass
+_LITTLE_ENDIAN = sys.byteorder == "little"
+
+#: Brightness lookup tables, built once per level and shared. A full
+#: animation is 918 KB of pixels, so scaling a byte at a time in Python
+#: is the difference between a snappy upload and a visible stall.
+_LUT_CACHE: dict[int, bytes] = {}
+
+
+def _brightness_lut(brightness: int) -> bytes:
+    lut = _LUT_CACHE.get(brightness)
+    if lut is None:
+        lut = bytes(i * brightness // 255 for i in range(256))
+        _LUT_CACHE[brightness] = lut
+    return lut
+
+
 class Frame:
-    """One still image on the strip, as 0x00RRGGBB values per LED."""
+    """One still image on the strip, as 0x00RRGGBB values per LED.
 
-    pixels: list[int] = field(default_factory=lambda: [0] * LEDS)
+    Pixels live in an ``array("I")`` rather than a list: 1.3 KB a frame
+    instead of roughly 12 KB, which matters at 941 frames.
+    """
 
-    def __post_init__(self) -> None:
-        if len(self.pixels) != LEDS:
-            raise ValueError(f"a frame holds {LEDS} pixels, got {len(self.pixels)}")
+    __slots__ = ("pixels",)
+
+    def __init__(self, pixels: Sequence[int] | None = None):
+        if pixels is None:
+            self.pixels = array("I", bytes(LEDS * 4))
+        else:
+            if len(pixels) != LEDS:
+                raise ValueError(f"a frame holds {LEDS} pixels, got {len(pixels)}")
+            self.pixels = array("I", pixels)
 
     def __setitem__(self, pos: tuple[int, int], rgb: int) -> None:
-        self.pixels[led_index(*pos)] = rgb
+        self.pixels[led_index(*pos)] = rgb & 0xFFFFFF
 
     def __getitem__(self, pos: tuple[int, int]) -> int:
         return self.pixels[led_index(*pos)]
 
     @classmethod
-    def from_rows(cls, rows: list[list[int]]) -> "Frame":
+    def from_rows(cls, rows: Sequence[Sequence[int]]) -> "Frame":
         if len(rows) != ROWS or any(len(r) != COLS for r in rows):
             raise ValueError(f"expected {ROWS} rows of {COLS}")
         return cls([rgb for row in rows for rgb in row])
@@ -81,18 +107,27 @@ class Frame:
     def encode(self, brightness: int = 255) -> bytes:
         """Pack to the wire form: three bytes per LED, B then G then R.
 
-        ``brightness`` is the 0-255 scale the driver derives from the
-        layer's 0-100 setting; every channel is multiplied by it.
+        On a little-endian host an ``array("I")`` of 0x00RRGGBB already
+        serialises as B, G, R, 0 -- so dropping every fourth byte gives
+        the wire order outright, and the brightness scale is one
+        ``translate`` over the whole frame. Both run in C.
         """
         if not 0 <= brightness <= 255:
             raise ValueError("brightness is 0..255")
-        out = bytearray(FRAME_BYTES)
-        for i, rgb in enumerate(self.pixels):
-            r = ((rgb >> 16) & 0xFF) * brightness // 255
-            g = ((rgb >> 8) & 0xFF) * brightness // 255
-            b = (rgb & 0xFF) * brightness // 255
-            out[i * 3 : i * 3 + 3] = bytes((b, g, r))
-        return bytes(out)
+
+        if _LITTLE_ENDIAN:
+            raw = bytearray(self.pixels.tobytes())
+            del raw[3::4]
+        else:
+            raw = bytearray(FRAME_BYTES)
+            for i, rgb in enumerate(self.pixels):
+                raw[i * 3] = rgb & 0xFF
+                raw[i * 3 + 1] = (rgb >> 8) & 0xFF
+                raw[i * 3 + 2] = (rgb >> 16) & 0xFF
+
+        if brightness == 255:
+            return bytes(raw)
+        return bytes(raw.translate(_brightness_lut(brightness)))
 
 
 def brightness_to_byte(percent: int) -> int:
@@ -115,10 +150,15 @@ class Animation:
     speed: int | None = None
     brightness: int = 100
     boot: bool = False
+    _payload: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def max_frames(self) -> int:
         return MAX_FRAMES_BOOT if self.boot else MAX_FRAMES_ANIMATION
+
+    def invalidate(self) -> None:
+        """Drop the cached payload after editing frames or settings."""
+        self._payload = None
 
     def payload(self) -> bytes:
         """Build the bulk payload: header, frames, then the AA 55 magic.
@@ -126,6 +166,9 @@ class Animation:
         The result is padded out to whole 64-byte blocks, which is what
         the announce command counts.
         """
+        if self._payload is not None:
+            return self._payload
+
         frames = self.frames[: self.max_frames]
         if not frames:
             raise ValueError("an animation needs at least one frame")
@@ -146,7 +189,8 @@ class Animation:
         buf = bytearray(blocks * BLOCK)
         buf[: len(data)] = data
         buf[len(data) : len(data) + 2] = b"\xaa\x55"
-        return bytes(buf)
+        self._payload = bytes(buf)
+        return self._payload
 
     def block_count(self) -> int:
         return len(self.payload()) // BLOCK

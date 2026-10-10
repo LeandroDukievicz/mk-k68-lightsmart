@@ -160,6 +160,12 @@ class KT68Transport:
     def __init__(self, path: str | None = None, pacing: float = PACING):
         self.path = path or find_control_device()
         self.pacing = pacing
+        # A bulk upload is tens of thousands of transfers, so the wire
+        # buffers are allocated once and reused rather than per call.
+        self._tx = bytearray(WIRE_SIZE)
+        self._rx = bytearray(WIRE_SIZE)
+        self._set_req = _hidiocsfeature(WIRE_SIZE)
+        self._get_req = _hidiocgfeature(WIRE_SIZE)
         try:
             self._fd = os.open(self.path, os.O_RDWR)
         except PermissionError as exc:
@@ -185,16 +191,21 @@ class KT68Transport:
         """Send one 64-byte payload as a feature report."""
         if len(payload) > REPORT_SIZE:
             raise ValueError(f"payload is {len(payload)} bytes, max {REPORT_SIZE}")
-        buf = bytearray(WIRE_SIZE)
+        buf = self._tx
+        buf[0] = 0  # the device declares no report id
         buf[1 : 1 + len(payload)] = payload
+        if len(payload) < REPORT_SIZE:
+            # clear whatever the previous transfer left in the tail
+            buf[1 + len(payload) :] = bytes(REPORT_SIZE - len(payload))
         time.sleep(self.pacing)
-        fcntl.ioctl(self._fd, _hidiocsfeature(WIRE_SIZE), bytes(buf))
+        fcntl.ioctl(self._fd, self._set_req, buf)
 
     def get_feature(self) -> bytes:
         """Read one 64-byte feature report back from the keyboard."""
-        buf = bytearray(WIRE_SIZE)
+        buf = self._rx
+        buf[0] = 0
         time.sleep(self.pacing)
-        fcntl.ioctl(self._fd, _hidiocgfeature(WIRE_SIZE), buf)
+        fcntl.ioctl(self._fd, self._get_req, buf)
         return bytes(buf[1:])
 
     def send_bulk(self, payload: bytes) -> int:

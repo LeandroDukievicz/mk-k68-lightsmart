@@ -1,38 +1,64 @@
 # MK-K68-LightSmart
 
-Linux control panel for 68-key mechanical keyboards that carry a
-**65x5 dot-matrix LED strip** above the function row — the hardware whose
-vendor software only ships for Windows.
+Linux control panel for 68-key mechanical keyboards that carry a **65×5
+dot-matrix LED strip** above the function row — the hardware whose vendor
+software only ships for Windows.
 
-The keyboard's configuration protocol was reverse-engineered from the
-Windows driver; nothing here touches firmware. See
-[docs/PROTOCOL.md](docs/PROTOCOL.md) for the full write-up, including
-which parts are verified and which are still inferred.
+![The main screen](docs/images/02-home-lit.png)
+
+Nothing here touches firmware. The keyboard's own configuration
+protocol was reverse-engineered from the Windows driver and is spoken
+over the same vendor HID interface the Windows app uses. The full
+write-up, including exactly which parts are proven and which are still
+inferred, is in **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+
+---
+
+## The hardware
+
+| | |
+|---|---|
+| USB id | `05AC:024F` — the board borrows Apple's vendor id |
+| Strings | manufacturer `SONiX`, product `KT68 RGB` |
+| Keys | 68 keys + a slider switch, 69 addressable LEDs |
+| Strip | 65 columns × 5 rows = **325 RGB LEDs** |
+| Animation limits | 941 frames, or 134 for the boot animation |
+| Connection | **USB cable only** — the vendor interface is not exposed over wireless |
+
+The keyboard presents three HID interfaces. Typing goes through the
+first two; all configuration goes through the third:
+
+| Interface | Usage page | Role |
+|---|---|---|
+| 0 | `0x0001` / `0x06` | boot keyboard |
+| 1 | several | mouse, media keys, NKRO, plus a vendor collection (`0xFFFF`) the firmware uses to push events to the host |
+| 2 | **`0xFF13`** | **the configuration channel** |
+
+---
 
 ## Status
 
-Early. The transport layer is complete and proven against the real
-device; the GUI is not built yet.
+The transport is complete and proven against real hardware. The UI is
+one screen in; the rest is scaffolded.
 
 | Area | State |
 |---|---|
-| Device discovery (by usage page, not by guessing hidraw numbers) | done |
-| Feature-report transport, 15 ms pacing, ack handling | done |
-| Transaction envelope (begin / select / apply / end) | done |
-| Key table with LED indices, all 69 keys | done |
-| Per-key colour command | built, awaiting hardware confirmation |
-| Built-in animations | framing known, effect ids not yet |
-| Dot-matrix strip upload | geometry known, format not yet |
-| Key remap, macros | opcodes located, payloads not decoded |
-| GUI | not started |
+| Device discovery by usage page | ✅ done |
+| Feature-report transport, 15 ms pacing, ack handling | ✅ done |
+| Transaction envelope | ✅ done |
+| Key table, all 69 LED indices | ✅ done |
+| Per-key colour | ✅ implemented, confirmed on hardware |
+| Built-in animations | ⚠️ framing right, some effect ids still wrong |
+| Dot-matrix frame upload | ⚠️ format decoded, not yet confirmed on hardware |
+| Dot-matrix editor UI | 🚧 draws and paints, upload not wired |
+| Key remapping, macros | 🔍 opcodes located, payloads not decoded |
+| Music-reactive, settings screens | ⬜ not started |
 
-## Requirements
+---
 
-* The keyboard connected **by cable**, slide switch in wired mode. The
-  vendor interface is not exposed over the wireless link.
-* Python 3.10+.
+## Install
 
-## Install the udev rule
+### 1. udev rule
 
 Without it the tool needs root.
 
@@ -42,30 +68,188 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=hidraw
 ```
 
-The `60-` prefix matters: the rule tags the device `uaccess`, and the
-builtin that acts on that tag runs from `70-uaccess.rules`.
+The `60-` prefix is load-bearing. The rule tags the device `uaccess`,
+and the builtin that acts on that tag runs from `70-uaccess.rules` — a
+`99-` rule would sort *after* it and never take effect.
 
-## Use
+The rule is scoped to this one vendor/product id, and hands the device
+to whoever is logged in at the seat rather than making it world-writable.
+
+### 2. Dependencies
 
 ```sh
-python3 -m mk_k68_lightsmart.cli info     # what was detected (read-only)
-python3 -m mk_k68_lightsmart.cli keys     # every key and its LED index
-python3 -m mk_k68_lightsmart.cli raw "04 18" --read
-python3 -m mk_k68_lightsmart.cli key Esc FF0000
+sudo apt install python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore
 ```
 
-`raw` is the bring-up tool: it sends one payload and optionally reads the
-reply, which is how the remaining unknowns in the protocol get settled.
+Python 3.10 or newer. Nothing else — the transport is plain `fcntl.ioctl`.
 
-## Layout
+### 3. Run
+
+```sh
+./mk-k68-lightsmart-gui     # the desktop app
+./mk-k68-lightsmart info    # the CLI
+```
+
+---
+
+## The GUI
+
+![As it opens](docs/images/01-home.png)
+
+The screen structure mirrors the Windows app: a left rail of eight
+sections plus settings, a top bar, the keyboard with its strip, and a
+controls row.
+
+**What works now, on the Home screen:**
+
+- Click the colour swatch, then click any key — the key lights on the
+  keyboard and the command goes out immediately.
+- The bottom-right corner shows the exact 16 bytes that were built, so
+  you can watch the protocol as you click.
+- The status bar reports the device node, or why it could not be found.
+- Click or drag across the strip to paint it.
+
+---
+
+## CLI
+
+Useful for protocol work, since it sends one packet at a time.
+
+```sh
+# what was detected, read-only
+./mk-k68-lightsmart info
+
+# every key and the LED index the firmware uses for it
+./mk-k68-lightsmart keys
+
+# light one key
+./mk-k68-lightsmart key Esc FF0000
+
+# select a built-in animation
+./mk-k68-lightsmart effect 0x06 00FFFF --brightness 12 --speed 8
+
+# send anything, and optionally read the reply
+./mk-k68-lightsmart raw "04 18" --read
+```
+
+---
+
+## Protocol, in brief
+
+Full detail in [docs/PROTOCOL.md](docs/PROTOCOL.md). The shape of it:
+
+Commands are **64-byte HID feature reports** on interface 2. The device
+declares no report id, so the wire buffer is 65 bytes — a leading `0x00`
+then the payload. On Windows the driver calls `HidD_SetFeature`; on
+Linux that is `ioctl(fd, HIDIOCSFEATURE(65), buf)`.
+
+Every transfer is paced **15 ms**. This is not politeness — the firmware
+drops packets without it.
+
+After each framed step the keyboard is read back and **byte 3** of the
+reply is the status: `0x01` accepted, `0xFF` busy (resend once).
+
+### Two payload shapes
 
 ```
-mk_k68_lightsmart/
-    transport.py   HID feature-report channel, device discovery
-    protocol.py    command framing and the transaction envelope
-    layout.py      the 69 keys and their LED indices
-    cli.py         bring-up front end
-docs/PROTOCOL.md   the reverse-engineering write-up
-udev/              access rule
-reference/         vendor material, local only, never shipped
+04 <sub> ...                 control command
+<mode> <R> <G> <B> 00×4 <p8> <p9> <p10> <p11> 00 00 AA 55     data frame
 ```
+
+A data frame is 16 bytes ending in the magic `AA 55`; four of them fit
+in one report.
+
+### The envelope
+
+Data frames never travel alone:
+
+```
+04 18                          begin
+04 13 .. .. .. .. .. .. 01     select the lighting target
+<data frame>                   (no ack for this one)
+04 02                          apply
+04 F0                          end
+```
+
+### Lighting one key
+
+```
+80 R G B 00 00 00 00 <light_index> 00 0F 0F 00 00 AA 55
+```
+
+Mode `0x80` sets a single key. One key per transaction — that is the
+firmware's own limit, stated in the vendor manual too.
+
+### Uploading to the strip
+
+```
+04 18                                      begin
+04 31|33 .. .. .. .. .. .. <lo> <hi>       announce N 64-byte blocks
+<header><frames…>AA 55                     bulk payload, 64 bytes at a time
+04 02                                      apply
+04 F0                                      end
+```
+
+`0x31` is the boot animation (134 frames max, 4-byte header of frame
+count then speed); `0x33` is an ordinary animation (941 max, 2-byte
+header). Pixels are **three bytes each in B, G, R order**, pre-scaled by
+brightness, 325 per frame = 975 bytes. LEDs are addressed row-first:
+`index = row * 65 + col`.
+
+---
+
+## How this was worked out
+
+The vendor installer is Inno Setup; inside it, `DeviceDriver.exe` is a
+1.9 MB MFC application that statically links hidapi.
+
+1. `innoextract` to unpack the installer.
+2. `radare2` + a Capstone script to find every call into the HID
+   transport and recover the 64-byte buffer each caller builds, by
+   walking backwards from the call and collecting the immediate stores.
+   That produced the opcode table in one pass.
+3. The vendor's own `KeyboardLayout.xml` gave the LED index per key.
+4. The strip's geometry was measured off the manual's screenshots by
+   counting cell pitch in the pixels — 24 px pitch, 65 across, 5 down.
+5. The stock animations ship as a **SQLite** file, which settled the
+   data model: `led_index` 0‥324, `rgb_value` as `0x00RRGGBB`.
+
+Every protocol claim in `docs/PROTOCOL.md` cites the address it came
+from, so it can be re-checked.
+
+---
+
+## Packaging
+
+See [docs/PACKAGING.md](docs/PACKAGING.md) for the full reasoning.
+
+The short version: on a classic desktop **no snap interface grants
+`/dev/hidraw` access**. snapd's `hidraw` interface is only slotted by
+gadget snaps, i.e. Ubuntu Core:
+
+```
+$ snap interfaces | grep -E 'hidraw|raw-usb'
+:hardware-observe
+:hardware-random-control
+:hardware-random-observe
+:raw-usb
+```
+
+So the snap is built **classic**, which needs manual store review. The
+alternatives — `raw-usb` with libusb (needs detaching the kernel driver
+on every operation) and the `custom-device` interface (still a store
+review) — are written up with their trade-offs.
+
+---
+
+## Licence and provenance
+
+GPL-3.0-or-later.
+
+This is a clean interoperability reimplementation. It ships none of the
+manufacturer's code, artwork, strings or data — the UI is drawn, and the
+palette was sampled to match rather than copied. The vendor material
+used while reverse-engineering stays out of the repository.
+
+The project is not affiliated with, endorsed by, or derived from the
+source code of any keyboard manufacturer.
