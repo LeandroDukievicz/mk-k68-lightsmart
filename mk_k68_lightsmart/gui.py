@@ -17,7 +17,6 @@ from PySide6.QtGui import (
     QFont,
     QLinearGradient,
     QPainter,
-    QPainterPath,
     QPen,
 )
 from PySide6.QtWidgets import (
@@ -29,7 +28,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
-    QSizePolicy,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -478,12 +476,21 @@ class MainWindow(QMainWindow):
             self._paint_swatch()
 
     def connect_device(self) -> None:
+        if self.kb is not None:
+            self.kb.close()
+            self.kb = None
         try:
             self.kb = protocol.Keyboard()
             self.set_status(f"connected — {self.kb.t.path}", ok=True)
         except (DeviceNotFound, TransportError) as exc:
             self.kb = None
             self.set_status(str(exc), ok=False)
+
+    def closeEvent(self, event) -> None:
+        if self.kb is not None:
+            self.kb.close()
+            self.kb = None
+        super().closeEvent(event)
 
     def set_status(self, text: str, ok: bool) -> None:
         colour = "#3ddc84" if ok else "#ff6b6b"
@@ -498,6 +505,8 @@ class MainWindow(QMainWindow):
             fn()
         except TransportError as exc:
             self.set_status(f"{what} failed: {exc}", ok=False)
+            if self.kb is not None and self.kb.t.closed:
+                self.kb = None
         else:
             self.set_status(f"{what} sent", ok=True)
 

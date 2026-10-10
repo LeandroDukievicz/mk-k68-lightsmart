@@ -184,16 +184,46 @@ class Animation:
         bright = brightness_to_byte(self.brightness)
         body = b"".join(f.encode(bright) for f in frames)
         data = header + body
+        end = len(data)
 
-        blocks = (len(data) >> 6) + 1
+        blocks = self._blocks_for(end)
         buf = bytearray(blocks * BLOCK)
-        buf[: len(data)] = data
-        buf[len(data) : len(data) + 2] = b"\xaa\x55"
+        buf[:end] = data
+        # The driver leaves one byte after the data and puts the magic at
+        # end+1 (0x429EF5: `mov word [ebx+edx+1], 0x55AA`). Indexed writes,
+        # not a slice assignment -- `buf[a:a+2] = b"\xaa\x55"` would *grow*
+        # a bytearray whenever only one byte is left, quietly making the
+        # payload a non-multiple of 64 and truncating the terminator.
+        buf[end + 1] = 0xAA
+        buf[end + 2] = 0x55
         self._payload = bytes(buf)
         return self._payload
 
+    @staticmethod
+    def _blocks_for(data_len: int) -> int:
+        """Blocks to announce and send for ``data_len`` bytes of data.
+
+        The driver's own count is ``(len >> 6) + 1`` (0x429CF3). It writes
+        the terminator into a buffer far larger than it sends, so for the
+        few lengths where ``len % 64 >= 62`` its magic falls outside the
+        transmitted range. We send one more block in that case, which keeps
+        the announced and streamed counts equal and the terminator intact.
+        """
+        blocks = (data_len >> 6) + 1
+        if data_len + 3 > blocks * BLOCK:
+            blocks += 1
+        return blocks
+
     def block_count(self) -> int:
-        return len(self.payload()) // BLOCK
+        """How many 64-byte blocks the upload will announce and send.
+
+        Derived arithmetically so it never re-encodes the frames.
+        """
+        n = min(len(self.frames), self.max_frames)
+        if n == 0:
+            raise ValueError("an animation needs at least one frame")
+        header = 4 if self.boot else 2
+        return self._blocks_for(header + n * FRAME_BYTES)
 
     @property
     def command(self) -> int:

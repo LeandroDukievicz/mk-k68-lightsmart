@@ -17,16 +17,38 @@ def _hex(data: bytes, n: int = 16) -> str:
     return " ".join(f"{b:02X}" for b in data[:n])
 
 
+def _parse_colour(text: str) -> tuple[int, int, int]:
+    """Parse RRGGBB, with or without a leading #."""
+    value = text.lstrip("#")
+    if len(value) != 6 or not all(c in "0123456789abcdefABCDEF" for c in value):
+        raise ValueError(f"{text!r} is not a RRGGBB colour")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
+def _resolve_key(text: str) -> int:
+    """Turn a key name or a raw LED index into an index."""
+    key = layout.BY_NAME.get(text)
+    if key is not None:
+        return key.light_index
+    try:
+        index = int(text, 0)
+    except ValueError:
+        raise ValueError(
+            f"no key called {text!r}; run 'keys' for the list, or pass an index"
+        ) from None
+    if index not in layout.BY_LIGHT_INDEX:
+        raise ValueError(f"no key uses LED index {index}")
+    return index
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     """Report what was found, touching the device read-only."""
-    t = KT68Transport()
-    print(f"control interface : {t.path}")
-    print(f"usb id            : 05AC:024F (SONiX / KT68 RGB)")
-    print(f"keys              : {len(layout.KEYS)}")
-    print(f"dot-matrix        : 65 x 5 = 325 LEDs")
-    reply = t.get_feature()
-    print(f"feature read      : {_hex(reply)}")
-    t.close()
+    with KT68Transport() as t:
+        print(f"control interface : {t.path}")
+        print(f"usb id            : 05AC:024F (SONiX / KT68 RGB)")
+        print(f"keys              : {len(layout.KEYS)}")
+        print(f"dot-matrix        : 65 x 5 = 325 LEDs")
+        print(f"feature read      : {_hex(t.get_feature())}")
     return 0
 
 
@@ -38,7 +60,12 @@ def cmd_keys(args: argparse.Namespace) -> int:
 
 def cmd_raw(args: argparse.Namespace) -> int:
     """Send one raw payload. The blunt instrument for protocol work."""
-    payload = bytes.fromhex(args.hex.replace(",", " ").replace("-", " "))
+    try:
+        payload = bytes.fromhex(args.hex.replace(",", " ").replace("-", " "))
+    except ValueError as exc:
+        raise ValueError(f"{args.hex!r} is not hex bytes: {exc}") from None
+    if not payload:
+        raise ValueError("nothing to send")
     print(f"-> {_hex(payload, 64)}")
     with KT68Transport() as t:
         t.set_feature(payload)
@@ -48,17 +75,16 @@ def cmd_raw(args: argparse.Namespace) -> int:
 
 
 def cmd_key_colour(args: argparse.Namespace) -> int:
-    rgb = tuple(int(c, 16) for c in (args.colour[0:2], args.colour[2:4], args.colour[4:6]))
-    key = layout.BY_NAME.get(args.key)
-    index = key.light_index if key else int(args.key)
+    rgb = _parse_colour(args.colour)
+    index = _resolve_key(args.key)
     with protocol.Keyboard() as kb:
         kb.set_key_colour(index, rgb)
-    print(f"key {args.key} (light index {index}) -> #{args.colour}")
+    print(f"key {args.key} (LED index {index}) -> #{args.colour.lstrip('#')}")
     return 0
 
 
 def cmd_effect(args: argparse.Namespace) -> int:
-    rgb = tuple(int(c, 16) for c in (args.colour[0:2], args.colour[2:4], args.colour[4:6]))
+    rgb = _parse_colour(args.colour)
     with protocol.Keyboard() as kb:
         kb.set_effect(args.mode, rgb, brightness=args.brightness,
                       speed=args.speed, direction=args.direction)
@@ -103,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
     except TransportError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

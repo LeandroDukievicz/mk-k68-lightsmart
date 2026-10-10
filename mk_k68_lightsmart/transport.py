@@ -1,6 +1,6 @@
 """Low-level HID transport for the SONiX KT68 RGB "smart screen" keyboard.
 
-Reverse-engineered from the Windows driver (DeviceDriver.exe V1.1, Nov 2022).
+Reverse-engineered from the Windows driver (DeviceDriver.exe v1.1, 7 Mar 2023).
 
 The keyboard exposes three USB HID interfaces:
 
@@ -80,13 +80,17 @@ def _parse_report_descriptor(blob: bytes) -> tuple[int, int] | None:
     """
     usage_page = usage = None
     i = 0
-    while i < len(blob):
+    n = len(blob)
+    while i < n:
         prefix = blob[i]
         if prefix == 0xFE:  # long item, not used here
-            size = blob[i + 1]
-            i += 3 + size
+            if i + 1 >= n:
+                return None
+            i += 3 + blob[i + 1]
             continue
-        size = {0: 0, 1: 1, 2: 2, 3: 4}[prefix & 0x03]
+        size = (0, 1, 2, 4)[prefix & 0x03]
+        if i + 1 + size > n:
+            return None
         tag = prefix & 0xFC
         data = int.from_bytes(blob[i + 1 : i + 1 + size], "little")
         if tag == 0x04:      # Global: Usage Page
@@ -144,9 +148,9 @@ def find_control_device() -> str:
             "is the keyboard connected by cable and the switch set to wired mode?"
         )
     seen = ", ".join(
-        f"{name} (usage page {p:#06x}/{u:#06x})" if i else f"{name} (undecoded)"
-        for name, i in candidates
-        for p, u in [i or (0, 0)]
+        f"{name} (usage page {ident[0]:#06x}/{ident[1]:#06x})"
+        if ident else f"{name} (undecoded)"
+        for name, ident in candidates
     )
     raise DeviceNotFound(
         "the keyboard was found but its vendor control interface "
@@ -173,6 +177,8 @@ class KT68Transport:
                 f"cannot open {self.path}: {exc}. Install the udev rule "
                 "(see udev/60-mk-k68-lightsmart.rules) or run as root."
             ) from exc
+        except OSError as exc:
+            raise TransportError(f"cannot open {self.path}: {exc}") from exc
 
     # -- context manager ------------------------------------------------
     def __enter__(self) -> "KT68Transport":
@@ -182,15 +188,26 @@ class KT68Transport:
         self.close()
 
     def close(self) -> None:
-        if getattr(self, "_fd", None) is not None:
-            os.close(self._fd)
-            self._fd = None
+        fd, self._fd = getattr(self, "_fd", None), None
+        if fd is not None:
+            os.close(fd)
+
+    @property
+    def closed(self) -> bool:
+        return getattr(self, "_fd", None) is None
+
+    def _check_open(self) -> int:
+        fd = getattr(self, "_fd", None)
+        if fd is None:
+            raise TransportError(f"transport for {self.path} is closed")
+        return fd
 
     # -- raw transfers --------------------------------------------------
     def set_feature(self, payload: bytes) -> None:
         """Send one 64-byte payload as a feature report."""
         if len(payload) > REPORT_SIZE:
             raise ValueError(f"payload is {len(payload)} bytes, max {REPORT_SIZE}")
+        fd = self._check_open()
         buf = self._tx
         buf[0] = 0  # the device declares no report id
         buf[1 : 1 + len(payload)] = payload
@@ -198,14 +215,27 @@ class KT68Transport:
             # clear whatever the previous transfer left in the tail
             buf[1 + len(payload) :] = bytes(REPORT_SIZE - len(payload))
         time.sleep(self.pacing)
-        fcntl.ioctl(self._fd, self._set_req, buf)
+        try:
+            fcntl.ioctl(fd, self._set_req, buf)
+        except OSError as exc:
+            raise TransportError(
+                f"write to {self.path} failed: {exc} "
+                "(was the keyboard unplugged?)"
+            ) from exc
 
     def get_feature(self) -> bytes:
         """Read one 64-byte feature report back from the keyboard."""
+        fd = self._check_open()
         buf = self._rx
         buf[0] = 0
         time.sleep(self.pacing)
-        fcntl.ioctl(self._fd, self._get_req, buf)
+        try:
+            fcntl.ioctl(fd, self._get_req, buf)
+        except OSError as exc:
+            raise TransportError(
+                f"read from {self.path} failed: {exc} "
+                "(was the keyboard unplugged?)"
+            ) from exc
         return bytes(buf[1:])
 
     def send_bulk(self, payload: bytes) -> int:

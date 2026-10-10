@@ -84,8 +84,19 @@ back and inspects **byte 3** of the payload:
 | `0x01` | success |
 | `0xFF` | busy — the driver resends once and reads again |
 
-Payloads longer than 65 bytes are split into 64-byte chunks
-(`0x455FF1`: `chunks = (len >> 6) - 1`).
+### Bulk transfers
+
+There are **two** bulk paths, and they do not count blocks the same way.
+Getting this wrong means the firmware either waits for blocks that never
+arrive or ignores the tail, so it is worth stating plainly:
+
+| Function | Used by | Chunks sent |
+|---|---|---|
+| `fcn.00455E50` (`0x455FF1`) | macro upload | `(len >> 6) - 1` |
+| `fcn.004561C0` (`0x456336`) | dot-matrix animation upload | `(len >> 6) + 1` |
+
+The animation path is the `+1` one, and the count it announces
+(`0x429CF3`) uses the same `+1`, so announce and stream agree.
 
 ## 3. Framing
 
@@ -109,15 +120,15 @@ Sub-commands seen in the binary:
 | `0x02` | 16 call sites | apply / flush |
 | `0x11` | `0x416F9E` | key remap block follows (byte 8 = `0x09`) |
 | `0x13` | `0x4305EC` | select lighting target (byte 8 = `0x01`) |
-| `0x15` | `0x43327C` | — |
+| `0x15` | `0x43327C` | macro block follows; byte 8 = block count |
 | `0x17` | `0x439F77` | — (byte 8 = `0x01`) |
 | `0x18` | 13 call sites | begin transaction |
 | `0x19` | `0x432DA4` | — |
 | `0x20` | `0x42B34E` | — (byte 8 = `0x08`) |
 | `0x23` | `0x430787` | — (byte 8 = `0x09`) |
 | `0x27` | `0x41778E` | Fn-layer remap block (byte 8 = `0x09`) |
-| `0x31` | `0x429D3E` | macro-related |
-| `0x33` | `0x42A0F8` | macro-related |
+| `0x31` | `0x429D3E` | dot-matrix **boot** animation follows; bytes 8-9 = block count (LE16) |
+| `0x33` | `0x42A0F8` | dot-matrix animation follows; bytes 8-9 = block count (LE16) |
 | `0x35` | `0x42A41F` | — (byte 8 = `0x10`) |
 | `0x61` | `0x428B62` | — |
 | `0xF0` | 8 call sites | end transaction |
@@ -226,24 +237,75 @@ Built-in strip effects (strings 860-871): Boot Logo, CPU Usage, GPU
 Usage, Internet Speed, Datatime, Sedentary Reminder, Musical, Sound
 Spectrum, Tetris, Rain 1, Color, Rain 2.
 
-`fcn.00430DA0` emits a run of frames with a loop counter in byte 0:
+### Frame upload — `fcn.00429C20` (boot) and `fcn.00429FE0` (animation)
+
+**verified** against the driver's encoder.
 
 ```
-<n> FF 00 00 00 00 00 00 01 10 0C 00 00 00 AA 55
+04 18                                      begin
+04 31|33 .. .. .. .. .. .. <lo> <hi>       announce <blocks> 64-byte blocks
+<header><frames…> AA 55                    bulk payload via fcn.004561C0
+04 02                                      apply
+04 F0                                      end
 ```
 
-wrapped in the usual envelope. The per-frame pixel upload itself has not
-been decoded yet.
+| | `0x31` boot logo | `0x33` animation |
+|---|---|---|
+| Frame cap | 134 (`cmovg`, `0x429CD5`) | 941 |
+| Header | 4 bytes: count LE16, speed LE16 | 2 bytes: count LE16 |
 
-## 7. What is still open
+Each frame is 325 LEDs × 3 bytes = **975 bytes**, written **B, G, R**
+(`0x429EBC`-`0x429ED0`), every channel pre-multiplied by
+`brightness / 255` (`0x429E56`, with 255.0f at `0x59353C`). Brightness
+reaches the encoder as `percent * 255 / 100`; the speed wire value is
+`0x66 - setting`, or `0x50` when the layer has none.
 
-1. Numeric ids for the 22 lighting effects.
-2. Which of bytes 8-11 is brightness, speed, direction, random-colour,
-   and their ranges.
-3. The dot-matrix frame upload format and its chunking.
-4. Key remap and macro payload layouts (`0x11`, `0x27`, `0x31`, `0x33`).
-5. Meaning of sub-commands `0x15`, `0x17`, `0x19`, `0x20`, `0x23`,
-   `0x35`, `0x61`, `0xF5`.
+`blocks = (len(data) >> 6) + 1` (`0x429CF3`). The terminator goes at
+`len(data) + 1` — the driver leaves one spare byte — via
+`mov word [ebx+edx+1], 0x55AA` (`0x429EF5`). The driver writes into a
+buffer far larger than it transmits, so for the handful of lengths where
+`len % 64 >= 62` its own magic lands outside the transmitted range; this
+implementation sends one extra block in that case so the terminator
+survives.
+
+### The stock animations
+
+They ship as a **SQLite** database (`db/ledlayer_v1.data`):
+
+```sql
+t_ledlayer_data(led_id, profile, name, desc, speed, brightness, type, state)
+t_led_frames(frames_id, layer_id, frameIndex, led_index, rgb_value)
+t_default_led_frames(...)   -- same shape
+```
+
+`led_index` runs 0‥324 and `rgb_value` is `0x00RRGGBB`. Layer 1 is the
+boot logo with exactly 134 frames, which is where the cap comes from.
+
+## 7. Macros
+
+**partly verified** — `fcn.00432D10`, bulk via `fcn.00455E50`
+
+```
+04 15 .. .. .. .. .. .. <blocks>     announce
+<encoded events> AA 55               bulk payload
+04 02                                apply
+```
+
+`blocks = len/64 + (1 if len % 64 == 0 else 2)` (`0x433230`). Events are
+encoded one at a time; a key event emits the marker `0x50` followed by
+two bytes from the event record (`0x432F8F`). The full event encoding is
+not decoded yet.
+
+## 8. What is still open
+
+1. Numeric ids for the 22 lighting effects — the string table names
+   them but never numbers them.
+2. Which of bytes 8-11 is brightness, speed, direction and
+   random-colour, and their ranges.
+3. Key remap payload layout (`0x11`, `0x27`; 694 and 684 bytes).
+4. The macro event encoding beyond the `0x50` key marker.
+5. Meaning of sub-commands `0x17`, `0x19`, `0x20`, `0x23`, `0x35`,
+   `0x61`, `0xF5`.
 
 All five are quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.
