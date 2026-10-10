@@ -196,3 +196,20 @@ class KT68Transport:
         time.sleep(self.pacing)
         fcntl.ioctl(self._fd, _hidiocgfeature(WIRE_SIZE), buf)
         return bytes(buf[1:])
+
+    def send_bulk(self, payload: bytes) -> int:
+        """Send a payload longer than one report, 64 bytes at a time.
+
+        The driver splits bulk transfers the same way and paces each
+        chunk, which is why this does not try to go faster. Returns the
+        number of chunks sent.
+        """
+        if len(payload) % REPORT_SIZE:
+            raise ValueError(
+                f"bulk payload must be a multiple of {REPORT_SIZE} bytes, "
+                f"got {len(payload)}"
+            )
+        chunks = len(payload) // REPORT_SIZE
+        for i in range(chunks):
+            self.set_feature(payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE])
+        return chunks

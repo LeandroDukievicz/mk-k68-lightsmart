@@ -163,6 +163,36 @@ class Keyboard:
         """
         self.transaction(data_frame(mode, rgb, p8, brightness, speed, direction))
 
+    # -- dot-matrix strip -----------------------------------------------
+    def upload_animation(self, animation, progress=None) -> int:
+        """Push an animation to the 65x5 strip.
+
+        Mirrors the driver's bulk path: announce the block count, stream
+        the payload, then apply. The keyboard shows a loading screen for
+        the duration -- unplugging it midway leaves the upload unfinished,
+        which is what the vendor manual warns about.
+
+        ``progress`` is called with ``(chunk, total)`` as the payload goes
+        out, so a GUI can show a bar. Returns the chunks sent.
+        """
+        payload = animation.payload()
+        blocks = len(payload) // 64
+
+        self._step(control(SUB_BEGIN))
+        self._step(control(animation.command,
+                           b8=blocks & 0xFF, b9=(blocks >> 8) & 0xFF))
+
+        sent = 0
+        for i in range(blocks):
+            self.t.set_feature(payload[i * 64 : (i + 1) * 64])
+            sent += 1
+            if progress is not None:
+                progress(sent, blocks)
+
+        self._step(control(SUB_APPLY))
+        self._step(control(SUB_END))
+        return sent
+
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.
 
