@@ -234,6 +234,84 @@ def cmd_vendor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pattern(args: argparse.Namespace) -> int:
+    """Upload one of the animations the program generates itself."""
+    from . import patterns
+
+    if args.name is None:
+        width = max(len(n) for n in patterns.BUILT_INS)
+        for name, label in patterns.BUILT_INS.items():
+            print(f"{name:<{width}}  {label}")
+        return 0
+
+    frames = patterns.build(args.name)
+    animation = matrix.Animation(
+        frames=frames, brightness=args.brightness, speed=args.speed
+    )
+    blocks = animation.block_count()
+    print(f"pattern       : {args.name}")
+    print(f"frames        : {len(frames)}")
+    print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
+    print(f"estimated     : {blocks * 0.015:.0f}s")
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    last = 0
+
+    def report(sent: int, total: int) -> None:
+        nonlocal last
+        if sent - last >= 128 or sent == total:
+            last = sent
+            print(f"\rsending       : {sent}/{total} blocks", end="", flush=True)
+
+    with protocol.Keyboard() as kb:
+        kb.upload_animation(animation, progress=report)
+    print()
+    return 0
+
+
+def cmd_image(args: argparse.Namespace) -> int:
+    """Upload a picture or an animation to the strip.
+
+    The vendor's library serves its designs as wide, short GIFs, which
+    is the strip drawn at ten or more pixels per LED; this scales one
+    back down to 65x5. Importing Qt here rather than at module level
+    keeps the rest of the CLI usable without a desktop toolkit.
+    """
+    from . import image as image_module
+
+    loaded = image_module.load(args.path, stride=args.stride, limit=args.frames)
+    animation = matrix.Animation(
+        frames=loaded.frames, brightness=args.brightness, speed=args.speed
+    )
+    blocks = animation.block_count()
+    kept = (f"every {args.stride} of {loaded.available}" if args.stride > 1
+            else f"all {loaded.available}")
+    print(f"source        : {loaded.size[0]}x{loaded.size[1]}, "
+          f"{loaded.available} frame(s)"
+          + (f", {loaded.delay_ms} ms apart" if loaded.delay_ms else ""))
+    print(f"importing     : {len(loaded.frames)} frames ({kept})")
+    print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
+    print(f"estimated     : {blocks * 0.015:.0f}s")
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    last = 0
+
+    def report(sent: int, total: int) -> None:
+        nonlocal last
+        if sent - last >= 128 or sent == total:
+            last = sent
+            print(f"\rsending       : {sent}/{total} blocks", end="", flush=True)
+
+    with protocol.Keyboard() as kb:
+        kb.upload_animation(animation, progress=report)
+    print()
+    return 0
+
+
 def cmd_effect_scan(args: argparse.Namespace) -> int:
     """Walk the effect modes one at a time, recording what each does.
 
@@ -365,6 +443,24 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--dwell", type=float, default=4.0,
                     help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
+
+    pt = sub.add_parser("pattern", help="upload a built-in animation")
+    pt.add_argument("name", nargs="?",
+                    help="which one; omit to list them")
+    pt.add_argument("--brightness", type=int, default=100, help="0-100")
+    pt.add_argument("--speed", type=int, help="1-100; omit for the default")
+    pt.add_argument("--dry-run", action="store_true")
+    pt.set_defaults(func=cmd_pattern)
+
+    i = sub.add_parser("image", help="upload an image or GIF to the strip")
+    i.add_argument("path", help="any image Qt can read; GIFs animate")
+    i.add_argument("--stride", type=int, default=1,
+                   help="keep every nth frame (default 1)")
+    i.add_argument("--frames", type=int, help="stop after this many frames")
+    i.add_argument("--brightness", type=int, default=100, help="0-100")
+    i.add_argument("--speed", type=int, help="1-100; omit for the default")
+    i.add_argument("--dry-run", action="store_true")
+    i.set_defaults(func=cmd_image)
 
     v = sub.add_parser(
         "vendor", help="list or upload stock animations from a vendor database")
