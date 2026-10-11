@@ -134,6 +134,30 @@ def _parse_report_descriptor(blob: bytes) -> tuple[int, int] | None:
     return None
 
 
+def keyboard_present() -> bool:
+    """Whether any interface of this keyboard is on the bus at all.
+
+    Distinguishes "not plugged in, or the switch is not on wired" from
+    "plugged in, but the control interface is not reachable" -- which
+    are different problems with different fixes, and the only two the
+    setup screen can tell apart without opening anything.
+    """
+    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        uevent = _read_sysfs(os.path.join(node, "device", "uevent"))
+        for line in uevent.splitlines():
+            if not line.startswith("HID_ID="):
+                continue
+            parts = line.split("=", 1)[1].split(":")
+            if len(parts) != 3:
+                continue
+            try:
+                if (int(parts[1], 16), int(parts[2], 16)) == (VENDOR_ID, PRODUCT_ID):
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
 def find_control_device() -> str:
     """Locate the /dev/hidraw node for the vendor control interface.
 

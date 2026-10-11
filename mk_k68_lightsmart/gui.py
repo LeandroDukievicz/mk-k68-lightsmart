@@ -8,7 +8,9 @@ nothing of the manufacturer's ships here.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -40,7 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import layout as kb_layout
-from . import matrix, protocol
+from . import matrix, protocol, transport
 from .worker import DeviceThread
 
 # -- palette, sampled from the vendor screenshots -----------------------
@@ -647,6 +649,109 @@ class MatrixPage(QWidget):
         self.status.emit(f"imported {name} — {len(self.frames)} frames")
 
 
+class SetupPage(QWidget):
+    """Why the keyboard is, or is not, reachable.
+
+    Every install hits the same wall: without the udev rule the control
+    interface is root-only and the app finds nothing. This screen states
+    which of the three conditions failed and hands over the exact
+    commands, rather than making someone read a README to learn that.
+    """
+
+    #: Where the rule has to live, and the prefix that makes it work.
+    RULE_NAME = "60-mk-k68-lightsmart.rules"
+    RULE_DIR = "/etc/udev/rules.d"
+
+    look_again = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(12)
+
+        card = Card()
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(18, 14, 18, 14)
+        cl.setSpacing(10)
+
+        title = QLabel("Setup")
+        title.setStyleSheet("color:#cfe3ff; font-size:13px; font-weight:bold;")
+        cl.addWidget(title)
+
+        self.checks = QLabel()
+        self.checks.setTextFormat(Qt.RichText)
+        self.checks.setWordWrap(True)
+        self.checks.setStyleSheet("color:#9fb3d0; font-size:12px;")
+        cl.addWidget(self.checks)
+
+        self.commands = QLabel()
+        self.commands.setWordWrap(True)
+        self.commands.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.commands.setStyleSheet(
+            "color:#cfe3ff; font-size:11px; font-family:monospace;"
+            " background:#061a33; border:1px solid #0d3a6b;"
+            " border-radius:3px; padding:10px;"
+        )
+        cl.addWidget(self.commands)
+
+        row = QHBoxLayout()
+        row.addWidget(ghost_button("Copy the commands", self.copy_commands))
+        row.addWidget(ghost_button("Check again", self.look_again.emit))
+        row.addStretch()
+        cl.addLayout(row)
+        lay.addWidget(card)
+        lay.addStretch()
+
+        self.refresh("starting…", False)
+
+    # -- state ----------------------------------------------------------
+    def rule_installed(self) -> bool:
+        return os.path.exists(os.path.join(self.RULE_DIR, self.RULE_NAME))
+
+    def refresh(self, device_status: str, connected: bool) -> None:
+        """Redraw from the three things that have to be true."""
+        rule = self.rule_installed()
+        rows = [
+            self._row(transport.keyboard_present(),
+                      "Keyboard on the bus — it has to be on the cable, "
+                      "with the switch in wired mode"),
+            self._row(rule, f"udev rule installed in {self.RULE_DIR}/"
+                            f"{self.RULE_NAME}"),
+            self._row(connected, f"Control interface: {device_status}"),
+        ]
+        self.checks.setText("<br>".join(rows))
+        self.commands.setText(self.command_text())
+
+    @staticmethod
+    def _row(ok: bool, text: str) -> str:
+        mark = "✓" if ok else "•"
+        colour = "#3ddc84" if ok else "#6a7d96"
+        return f'<span style="color:{colour}">{mark}</span>&nbsp; {text}'
+
+    def command_text(self) -> str:
+        source = str(_installed_rule_source())
+        return (
+            f"sudo cp {source} {self.RULE_DIR}/\n"
+            "sudo udevadm control --reload-rules\n"
+            "sudo udevadm trigger --action=add --subsystem-match=hidraw"
+        )
+
+    def copy_commands(self) -> None:
+        QApplication.clipboard().setText(self.command_text())
+
+
+def _installed_rule_source() -> Path:
+    """Where this install keeps its copy of the udev rule.
+
+    A snap is read-only and mounted somewhere else entirely, so the
+    path printed has to be the one this process can actually see.
+    """
+    snap = os.environ.get("SNAP")
+    root = Path(snap) if snap else Path(__file__).resolve().parent.parent
+    return root / "udev" / SetupPage.RULE_NAME
+
+
 class MainWindow(QMainWindow):
     #: Requests for the device, emitted from this thread and delivered on
     #: the worker's. Qt queues them, which is also what keeps two
@@ -703,6 +808,9 @@ class MainWindow(QMainWindow):
         self.matrix_page.cancel_requested.connect(self.cancel_upload)
         self.matrix_page.status.connect(self.set_status)
         self.pages.addWidget(self.matrix_page)
+        self.setup_page = SetupPage()
+        self.setup_page.look_again.connect(self.reconnect)
+        self.pages.addWidget(self.setup_page)
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
 
@@ -768,8 +876,8 @@ class MainWindow(QMainWindow):
         lay.addStretch()
         gear = SidebarButton("⚙", "Setup")
         gear.setCheckable(False)
-        gear.setToolTip("Look for the keyboard again")
-        gear.clicked.connect(self.reconnect)
+        gear.setToolTip("Device and permissions")
+        gear.clicked.connect(self.show_setup)
         lay.addWidget(gear)
         return side
 
@@ -973,12 +1081,20 @@ class MainWindow(QMainWindow):
 
     def reconnect(self) -> None:
         self.set_status("looking for the keyboard…")
+        self.setup_page.refresh("looking…", False)
         self.request_open.emit()
+
+    def show_setup(self) -> None:
+        """Open the setup screen, which is not one of the rail's pages."""
+        for b in self.nav_buttons:
+            b.setChecked(False)
+        self.pages.setCurrentWidget(self.setup_page)
 
     def on_connected(self, path: str) -> None:
         self._connected = True
         self.upload_button.setEnabled(not self._uploading)
         self.matrix_page.set_connected(not self._uploading)
+        self.setup_page.refresh(path, True)
         self.set_status(f"connected — {path}", ok=True)
 
     def on_disconnected(self, why: str) -> None:
@@ -987,6 +1103,7 @@ class MainWindow(QMainWindow):
             self._set_uploading(False)
         self.upload_button.setEnabled(False)
         self.matrix_page.set_connected(False)
+        self.setup_page.refresh(why, False)
         self.set_status(
             f"{why} — plug it in by cable, wired mode, then press Setup",
             ok=False,

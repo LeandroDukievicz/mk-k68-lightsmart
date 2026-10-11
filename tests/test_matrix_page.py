@@ -177,3 +177,40 @@ class Uploading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class SetupScreen(unittest.TestCase):
+    """What the screen claims has to be what it checked."""
+
+    def setUp(self) -> None:
+        self.page = gui.SetupPage()
+
+    def test_the_commands_name_this_installs_own_rule(self):
+        text = self.page.command_text()
+        self.assertIn(gui.SetupPage.RULE_NAME, text)
+        self.assertIn(gui.SetupPage.RULE_DIR, text)
+        self.assertEqual(len(text.splitlines()), 3)
+
+    def test_a_snap_install_points_at_the_snap(self):
+        # $SNAP is read-only and mounted elsewhere, so the path printed
+        # has to be the one the running process can see.
+        with unittest.mock.patch.dict(os.environ, {"SNAP": "/snap/x/current"}):
+            self.assertTrue(
+                gui._installed_rule_source().as_posix().startswith("/snap/x/current")
+            )
+
+    def test_every_row_reports_a_checked_condition(self):
+        self.page.refresh("/dev/hidraw9", True)
+        html = self.page.checks.text()
+        self.assertEqual(html.count("<br>"), 2)
+        self.assertIn("/dev/hidraw9", html)
+        # The rule row has to agree with the filesystem, not a constant.
+        marker = "✓" if self.page.rule_installed() else "•"
+        rule_row = [r for r in html.split("<br>") if "udev rule" in r][0]
+        self.assertIn(marker, rule_row)
+
+    def test_a_disconnected_device_is_not_drawn_as_connected(self):
+        self.page.refresh("no keyboard", False)
+        rows = self.page.checks.text().split("<br>")
+        self.assertIn("•", rows[-1])
