@@ -42,10 +42,19 @@ class EditorModel(unittest.TestCase):
     def setUp(self) -> None:
         self.colour = QColor("#ff0000")
         self.page = gui.MatrixPage(lambda: self.colour)
+        self.assertGreater(len(self.page.frames), 1, "the default should load")
+        # The rest of these are about editing, so start from a blank.
+        self.page.frames = [matrix.Frame()]
+        self.page.current = 0
+        self.page._refresh_timeline()
 
-    def test_starts_with_one_blank_frame(self):
-        self.assertEqual(len(self.page.frames), 1)
-        self.assertEqual(self.page.timeline.count(), 1)
+    def test_it_opens_on_the_default_pattern(self):
+        fresh = gui.MatrixPage(lambda: self.colour)
+        self.assertEqual(
+            [list(f.pixels) for f in fresh.frames],
+            [list(f.pixels) for f in gui.patterns.build(fresh.DEFAULT_PATTERN)],
+        )
+        self.assertEqual(fresh.timeline.count(), len(fresh.frames))
 
     def test_painting_writes_into_the_current_frame(self):
         self.page.add_frame()
@@ -107,6 +116,9 @@ class EditorModel(unittest.TestCase):
 class Playback(unittest.TestCase):
     def setUp(self) -> None:
         self.page = gui.MatrixPage(lambda: QColor("#00ff00"))
+        self.page.frames = [matrix.Frame()]
+        self.page.current = 0
+        self.page._refresh_timeline()
 
     def test_a_single_frame_is_not_an_animation(self):
         notes = []
@@ -132,6 +144,9 @@ class Playback(unittest.TestCase):
 class Uploading(unittest.TestCase):
     def setUp(self) -> None:
         self.page = gui.MatrixPage(lambda: QColor("#0000ff"))
+        self.page.frames = [matrix.Frame()]
+        self.page.current = 0
+        self.page._refresh_timeline()
 
     def test_upload_hands_over_what_the_editor_holds(self):
         self.page.add_frame()
@@ -214,3 +229,83 @@ class SetupScreen(unittest.TestCase):
         self.page.refresh("no keyboard", False)
         rows = self.page.checks.text().split("<br>")
         self.assertIn("•", rows[-1])
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class ImportingAPicture(unittest.TestCase):
+    """The file dialog's end of the import, with the dialogs stubbed."""
+
+    #: the same two-frame GIF the image tests use
+    import base64 as _base64
+    TINY_GIF = _base64.b64decode(
+        "R0lGODlhAgABAPAAAP8AAAAA/yH5BAAKAAAALAAAAAACAAEAAAICBAoAIfkEAAoAAAAsAAAA"
+        "AAIAAQAAAgJMCgA7"
+    )
+
+    def setUp(self) -> None:
+        import tempfile
+        self.page = gui.MatrixPage(lambda: QColor("#ffffff"))
+        self.page.frames = [matrix.Frame()]
+        self.page.current = 0
+        self.page._refresh_timeline()
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "tiny.gif")
+        with open(self.path, "wb") as fh:
+            fh.write(self.TINY_GIF)
+
+    def _choose(self, path):
+        return unittest.mock.patch.object(
+            gui.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (path, ""))
+        )
+
+    def test_a_chosen_file_becomes_the_frames(self):
+        notes = []
+        self.page.status.connect(notes.append)
+        with self._choose(self.path):
+            self.page.import_image()
+        self.assertEqual(len(self.page.frames), 2)
+        self.assertEqual(self.page.timeline.count(), 2)
+        self.assertEqual(self.page.current, 0)
+        self.assertIn("imported 2 frames", notes[-1])
+
+    def test_cancelling_the_dialog_changes_nothing(self):
+        before = list(self.page.frames)
+        with self._choose(""):
+            self.page.import_image()
+        self.assertEqual(self.page.frames, before)
+
+    def test_a_file_that_is_not_an_image_is_reported_not_raised(self):
+        bad = os.path.join(self.dir.name, "notes.txt")
+        with open(bad, "w") as fh:
+            fh.write("not a picture")
+        with self._choose(bad), unittest.mock.patch.object(
+            gui.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+        ) as warned:
+            self.page.import_image()
+        self.assertEqual(len(self.page.frames), 1)     # the blank it started with
+
+    def test_a_long_animation_asks_how_many_frames_to_keep(self):
+        # Pretend the file holds more than the page imports without asking.
+        peek = gui.image.Imported(frames=[matrix.Frame()], available=312,
+                                  delay_ms=100, size=(700, 70))
+        asked = {}
+
+        def fake_getInt(parent, title, label, value, lo, hi):
+            asked.update(default=value, low=lo, high=hi, label=label)
+            return value, True
+
+        with self._choose(self.path), \
+             unittest.mock.patch.object(gui.image, "load",
+                                        side_effect=[peek, peek]), \
+             unittest.mock.patch.object(gui.QInputDialog, "getInt",
+                                        staticmethod(fake_getInt)):
+            self.page.import_image()
+
+        self.assertEqual(asked["default"], 3)          # 312 / 120, rounded up
+        self.assertEqual(asked["high"], 312)
+        self.assertIn("312 frames", asked["label"])
+
+    def test_the_time_estimate_matches_the_payload(self):
+        blocks = matrix.Animation(frames=[matrix.Frame()] * 10).block_count()
+        self.assertEqual(self.page._seconds_for(10), round(blocks * 0.015))

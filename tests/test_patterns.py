@@ -1,0 +1,242 @@
+"""Checks the animations the program generates.
+
+These are art, so most of what matters cannot be asserted. What can is
+that the wall actually closes, that every piece is a real tetromino
+dropped onto a clear path, and that the rain's last frame leads back
+into its first -- the things that would be wrong on the keyboard and
+hard to see in a diff.
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from mk_k68_lightsmart import matrix, patterns
+
+
+class TheWall(unittest.TestCase):
+    def test_the_last_frame_is_every_led(self):
+        last = patterns.tetris_fill()[-1]
+        dark = [i for i, pixel in enumerate(last.pixels) if not pixel]
+        self.assertEqual(dark, [], "the wall has holes")
+
+    @staticmethod
+    def pieces():
+        return [piece for wave in patterns._wall_waves() for piece in wave]
+
+    def test_the_pieces_cover_the_strip_exactly_once(self):
+        seen: dict[tuple[int, int], str] = {}
+        for name, cells in self.pieces():
+            for cell in cells:
+                self.assertNotIn(cell, seen, f"{name} overlaps {seen.get(cell)}")
+                seen[cell] = name
+        self.assertEqual(len(seen), matrix.LEDS)
+
+    def test_every_piece_is_a_tetromino_but_the_one_that_cannot_be(self):
+        # 65 x 5 is 325 cells and a tetromino is four; 325 is not a
+        # multiple of 4, so exactly one cell is left for a piece the
+        # game does not have.
+        sizes = [len(cells) for _, cells in self.pieces()]
+        self.assertEqual(sorted(sizes)[0], 1)
+        self.assertEqual(sorted(sizes).count(1), 1)
+        self.assertTrue(all(n == 4 for n in sorted(sizes)[1:]))
+
+    def test_every_piece_falls_onto_a_clear_path(self):
+        """Nothing lands under something already resting.
+
+        Checked per wave, since a wave falls all at once: what has to be
+        clear above a piece is whatever the earlier waves left there.
+        """
+        filled: set[tuple[int, int]] = set()
+        for wave in patterns._wall_waves():
+            columns: dict[int, str] = {}
+            for name, cells in wave:
+                tops: dict[int, int] = {}
+                for col, row in cells:
+                    tops[col] = min(tops.get(col, row), row)
+                for col, top in tops.items():
+                    # Two pieces in one wave may not share a column
+                    # either: they would collide on the way down.
+                    self.assertNotIn(col, columns,
+                                     f"{name} shares column {col} with "
+                                     f"{columns.get(col)} in the same wave")
+                    columns[col] = name
+                    for row in range(top):
+                        self.assertNotIn(
+                            (col, row), filled,
+                            f"{name} would have to fall through ({col},{row})"
+                        )
+            for _, cells in wave:
+                filled.update(cells)
+
+    def test_the_wall_uses_every_tetromino(self):
+        shapes = {name for name, _ in self.pieces() if name != "_"}
+        self.assertEqual(shapes, set(patterns.PIECE_COLOURS),
+                         "the fills between them should use all seven")
+
+    def test_every_wave_spans_the_whole_strip(self):
+        # The point of waves: pieces come down across the strip at once
+        # rather than filling it left to right.
+        for n, wave in enumerate(patterns._wall_waves()):
+            columns = {col for _, cells in wave for col, _ in cells}
+            self.assertGreater(max(columns) - min(columns), matrix.COLS - 8,
+                               f"wave {n} covers only part of the strip")
+
+    def test_a_slower_pace_is_the_same_fall_with_more_frames(self):
+        quick = patterns.tetris_fill(pace=1, hold=0)
+        slow = patterns.tetris_fill(pace=2, hold=0)
+        self.assertEqual(len(slow), 2 * len(quick))
+        self.assertEqual(list(slow[-1].pixels), list(quick[-1].pixels))
+
+    def test_the_first_frame_is_not_the_last(self):
+        frames = patterns.tetris_fill(hold=0)
+        self.assertNotEqual(list(frames[0].pixels), list(frames[-1].pixels))
+
+    def test_a_nonsense_pace_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.tetris_fill(pace=0)
+
+    def test_it_fits_what_the_keyboard_takes(self):
+        frames = patterns.tetris_fill()
+        self.assertLessEqual(len(frames), matrix.MAX_FRAMES_ANIMATION)
+        matrix.Animation(frames=frames).payload()      # must not raise
+
+
+class TheRain(unittest.TestCase):
+    def test_the_loop_closes(self):
+        # Frame 48 of a 49-frame run has to be frame 0 again, or the
+        # strip jumps every time the animation restarts.
+        short = patterns.matrix_rain("green")
+        long = patterns.matrix_rain("green", frames=len(short) + 1)
+        self.assertEqual(list(long[-1].pixels), list(short[0].pixels))
+
+    def test_each_colour_stays_in_its_own_hue(self):
+        for name, (base, head) in patterns.RAIN_COLOURS.items():
+            frame = patterns.matrix_rain(name)[0]
+            for pixel in frame.pixels:
+                if not pixel:
+                    continue
+                for shift in (16, 8, 0):
+                    if (base >> shift) & 0xFF or not (pixel >> shift) & 0xFF:
+                        continue
+                    # Only the near-white head may light a channel the
+                    # base colour leaves dark.
+                    self.assertEqual(pixel, head,
+                                     f"{name} lit a channel it should not")
+
+    def test_drops_leave_gaps(self):
+        # The point of the short tail: on five rows a longer one never
+        # leaves the strip dark anywhere.
+        counts = [sum(1 for p in f.pixels if p)
+                  for f in patterns.matrix_rain("green")]
+        self.assertLess(max(counts), matrix.LEDS // 2)
+        self.assertGreater(min(counts), 0)
+
+    def test_the_head_leads_the_tail(self):
+        frame = patterns.matrix_rain("green")[0]
+        for col in range(matrix.COLS):
+            rows = [r for r in range(matrix.ROWS) if frame[col, r]]
+            if len(rows) < 2:
+                continue
+            brightest = max(rows, key=lambda r: sum(
+                (frame[col, r] >> s) & 0xFF for s in (16, 8, 0)))
+            self.assertEqual(brightest, max(rows), f"column {col}")
+
+    def test_an_unknown_colour_names_the_ones_there_are(self):
+        with self.assertRaises(ValueError) as caught:
+            patterns.matrix_rain("puce")
+        self.assertIn("magenta", str(caught.exception))
+
+    def test_an_empty_animation_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.matrix_rain("green", frames=0)
+
+
+class TheRunner(unittest.TestCase):
+    """The browser's game, at 65x5."""
+
+    def setUp(self) -> None:
+        self.frames = patterns.dino_run()
+        self.body = range(patterns.RUNNER_COLUMN,
+                          patterns.RUNNER_COLUMN + patterns.RUNNER_WIDTH)
+
+    def _on_the_ground(self, frame) -> bool:
+        return any(frame[col, row] == patterns.RUNNER_COLOUR
+                   for col in self.body for row in (2, 3))
+
+    def test_the_runner_never_runs_into_a_cactus(self):
+        """The whole point of the jump, and the easiest thing to break.
+
+        An earlier version scored only the nearest cactus ahead, so the
+        runner landed on the one it was still standing over.
+        """
+        for n, frame in enumerate(self.frames):
+            for col in self.body:
+                cactus = any(frame[col, row] == patterns.CACTUS_COLOUR
+                             for row in (2, 3))
+                if cactus:
+                    self.assertFalse(
+                        self._on_the_ground(frame),
+                        f"frame {n}: a cactus is in column {col} and the "
+                        "runner is on the ground"
+                    )
+
+    def test_it_both_runs_and_jumps(self):
+        airborne = sum(1 for f in self.frames if not self._on_the_ground(f))
+        self.assertGreater(airborne, 5, "it never leaves the ground")
+        self.assertLess(airborne, len(self.frames) - 5, "it never lands")
+
+    def test_the_ground_is_always_underfoot(self):
+        for n, frame in enumerate(self.frames):
+            lit = sum(1 for col in range(matrix.COLS) if frame[col, matrix.ROWS - 1])
+            self.assertEqual(lit, matrix.COLS, f"frame {n} has a gap in the ground")
+
+    def test_the_legs_move_while_it_runs(self):
+        grounded = [f for f in self.frames if self._on_the_ground(f)]
+        shapes = {
+            tuple(sorted((col, row) for col in self.body for row in range(matrix.ROWS)
+                         if f[col, row] == patterns.RUNNER_COLOUR))
+            for f in grounded
+        }
+        self.assertGreater(len(shapes), 1, "the runner is a statue")
+
+    def test_the_world_loops(self):
+        # One lap further on is the first frame again, or the strip
+        # jumps every time the animation restarts.
+        lap = patterns.dino_run(frames=len(self.frames) + 1)
+        self.assertEqual(list(lap[-1].pixels), list(self.frames[0].pixels))
+
+    def test_a_world_shorter_than_the_strip_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.dino_run(world=matrix.COLS - 1)
+
+    def test_there_are_cacti_to_jump(self):
+        seen = max(sum(1 for col in range(matrix.COLS) for row in range(matrix.ROWS)
+                       if f[col, row] == patterns.CACTUS_COLOUR)
+                   for f in self.frames)
+        self.assertGreater(seen, 2)
+
+
+class TheCatalogue(unittest.TestCase):
+    def test_every_name_builds(self):
+        for name in patterns.BUILT_INS:
+            frames = patterns.build(name)
+            self.assertTrue(frames)
+            self.assertLessEqual(len(frames), matrix.MAX_FRAMES_ANIMATION)
+
+    def test_an_unknown_name_lists_the_known_ones(self):
+        with self.assertRaises(ValueError) as caught:
+            patterns.build("pong")
+        self.assertIn("tetris", str(caught.exception))
+
+    def test_the_rain_colours_are_all_offered(self):
+        for colour in patterns.RAIN_COLOURS:
+            self.assertIn(f"matrix-{colour}", patterns.BUILT_INS)
+
+
+if __name__ == "__main__":
+    unittest.main()

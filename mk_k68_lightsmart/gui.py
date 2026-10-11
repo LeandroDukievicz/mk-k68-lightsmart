@@ -41,8 +41,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import image
 from . import layout as kb_layout
-from . import matrix, protocol, transport
+from . import matrix, patterns, protocol, transport
 from .worker import DeviceThread
 
 # -- palette, sampled from the vendor screenshots -----------------------
@@ -313,10 +314,19 @@ class MatrixPage(QWidget):
     #: The vendor's own speed scale, which the wire value is derived from.
     SPEED_MIN, SPEED_MAX = 1, 100
 
+    #: Frames an import keeps without asking. Past this the upload runs
+    #: longer than anyone waits for a lighting effect.
+    COMFORTABLE_FRAMES = 120
+
+    #: What the screen is holding when it opens.
+    DEFAULT_PATTERN = "tetris"
+
     def __init__(self, current_colour, parent: QWidget | None = None):
         super().__init__(parent)
         self._colour = current_colour
-        self.frames: list[matrix.Frame] = [matrix.Frame()]
+        # Opens on something worth looking at rather than a blank strip;
+        # Clear and Delete empty it for drawing.
+        self.frames: list[matrix.Frame] = patterns.build(self.DEFAULT_PATTERN)
         self.current = 0
         self._playing = False
 
@@ -451,6 +461,22 @@ class MatrixPage(QWidget):
         bright.addStretch()
         lay.addLayout(bright)
 
+        built_in = QHBoxLayout()
+        built_in.addWidget(caption("Built in"))
+        self.built_in = QComboBox()
+        for name, label in patterns.BUILT_INS.items():
+            self.built_in.addItem(label, name)
+        self.built_in.setStyleSheet(
+            "QComboBox { background:#0a2444; color:#cfe3ff; border:1px solid #0d3a6b;"
+            " border-radius:3px; padding:4px 8px; font-size:11px; }"
+            "QComboBox QAbstractItemView { background:#0a2444; color:#cfe3ff;"
+            " selection-background-color:#10a9fd; }"
+        )
+        built_in.addWidget(self.built_in, 1)
+        built_in.addWidget(ghost_button("Load", self.load_built_in))
+        lay.addLayout(built_in)
+
+        lay.addWidget(ghost_button("Import an image or GIF…", self.import_image))
         lay.addWidget(ghost_button("Import from a vendor database…",
                                    self.import_vendor))
 
@@ -604,6 +630,75 @@ class MatrixPage(QWidget):
         self.upload_progress.setValue(sent)
 
     # -- import ---------------------------------------------------------
+    def load_built_in(self) -> None:
+        """Load one of the animations the program generates itself."""
+        name = self.built_in.currentData()
+        self.stop()
+        self.frames = patterns.build(name)
+        self.current = 0
+        self._refresh_timeline()
+        self.status.emit(
+            f"loaded {name} — {len(self.frames)} frames, about "
+            f"{self._seconds_for(len(self.frames))} s to upload"
+        )
+
+    def import_image(self) -> None:
+        """Load a picture or an animation and squash it onto the strip.
+
+        The designs in the vendor's online library are wide, short GIFs
+        -- 700x70, hundreds of frames -- so the only real question is
+        how many of those frames to keep: the keyboard takes 15 ms a
+        block, which makes 312 frames a seventy-second upload.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open an image or animation", "",
+            "Images and animations (*.gif *.png *.jpg *.jpeg *.webp *.bmp);;"
+            "All files (*)"
+        )
+        if not path:
+            return
+        try:
+            peek = image.load(path, limit=1)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Could not read that file", str(exc))
+            return
+
+        stride = 1
+        if peek.available > self.COMFORTABLE_FRAMES:
+            suggested = -(-peek.available // self.COMFORTABLE_FRAMES)
+            stride, ok = QInputDialog.getInt(
+                self, "Import an animation",
+                f"{peek.available} frames, {peek.size[0]}x{peek.size[1]}.\n"
+                f"The whole thing uploads in about "
+                f"{self._seconds_for(peek.available)} s.\n\n"
+                "Keep every nth frame:",
+                suggested, 1, peek.available,
+            )
+            if not ok:
+                return
+
+        try:
+            loaded = image.load(path, stride=stride)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Could not read that file", str(exc))
+            return
+
+        self.stop()
+        self.frames = loaded.frames
+        self.current = 0
+        self._refresh_timeline()
+        kept = (f"every {stride} of {loaded.available}" if stride > 1
+                else f"all {loaded.available}")
+        self.status.emit(
+            f"imported {len(self.frames)} frames ({kept}) — "
+            f"about {self._seconds_for(len(self.frames))} s to upload"
+        )
+
+    @staticmethod
+    def _seconds_for(frames: int) -> int:
+        """Roughly how long uploading that many frames takes."""
+        return round(matrix.Animation._blocks_for(frames * 975 + 4) * 0.015)
+
     def import_vendor(self) -> None:
         """Load one layer out of a vendor animation database.
 
