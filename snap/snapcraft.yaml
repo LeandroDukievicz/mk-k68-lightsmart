@@ -59,20 +59,83 @@ parts:
     # A classic snap gets no system interpreter from snapcraft, so the
     # part must provision its own or the build stops at
     # "No suitable Python interpreter found".
+    #
+    # The Qt libraries come too. patchelf points every binary at the
+    # core24 loader, which searches the base snap rather than the host,
+    # so anything Qt links against has to be inside the snap -- without
+    # these, importing PySide6.QtGui fails on libGL.so.1.
     stage-packages:
       - python3.12-minimal
       - libpython3.12-minimal
       - libpython3.12-stdlib
+      - libgl1
+      - libegl1
+      - libx11-6
+      - libx11-xcb1
+      - libxcb1
+      - libxcb-cursor0
+      - libxcb-glx0
+      - libxcb-icccm4
+      - libxcb-image0
+      - libxcb-keysyms1
+      - libxcb-randr0
+      - libxcb-render0
+      - libxcb-render-util0
+      - libxcb-shape0
+      - libxcb-shm0
+      - libxcb-sync1
+      - libxcb-util1
+      - libxcb-xfixes0
+      - libxcb-xkb1
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libwayland-client0
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libfontconfig1
+      - libfreetype6
+      - libharfbuzz0b
+      - libdbus-1-3
     # Classic snaps are not relocated unless this is set, so the staged
     # interpreter and Qt's shared objects would keep build-time rpaths.
     build-attributes:
       - enable-patchelf
+    # Changing anything above re-runs this part's build over the install
+    # directory the last one left, and `python -m venv` will not build a
+    # venv on top of a venv: it stops at "ensurepip returned non-zero".
+    # After editing this part, clean it first:
+    #     snapcraft clean tool && snapcraft pack
+    override-prime: |
+      craftctl default
+      # The python plugin builds a venv inside the build container, so
+      # pyvenv.cfg records that container's interpreter (/usr/bin) and
+      # the entry points get `#!/usr/bin/env python3`. Left alone, the
+      # snap runs the *host's* python, which cannot see the snap's
+      # site-packages -- "No module named 'mk_k68_lightsmart'".
+      #
+      # Point both at the interpreter this snap ships. The path is the
+      # `current` symlink, which is what snapcraft's own patchelf uses
+      # for the base snap's libraries.
+      #
+      # The shebang must name the venv's own bin/python3, not the
+      # interpreter it links to: Python only reads pyvenv.cfg -- and so
+      # only finds site-packages -- when the executable it was started
+      # as lives inside the venv. Naming usr/bin/python3.12 directly
+      # builds and installs cleanly and then cannot import the app.
+      snap_root=/snap/mk-k68-lightsmart/current
+      sed -i "s|^home = .*|home = $snap_root/usr/bin|" pyvenv.cfg
+      sed -i "1s|.*|#!$snap_root/bin/python3|" \
+        bin/mk-k68-lightsmart bin/mk-k68-lightsmart-gui
 
+  # The desktop file lives in desktop/, not snap/gui/: snapcraft copies
+  # everything under snap/gui/ into meta/gui, and the `desktop:` key on
+  # the app installs its own copy, so a file in both places puts the app
+  # in the menu twice.
   integration:
     plugin: dump
     source: .
     organize:
-      snap/gui/mk-k68-lightsmart.desktop: usr/share/applications/mk-k68-lightsmart.desktop
+      desktop/mk-k68-lightsmart.desktop: usr/share/applications/mk-k68-lightsmart.desktop
       udev/60-mk-k68-lightsmart.rules: udev/60-mk-k68-lightsmart.rules
     stage:
       - usr/share/applications/mk-k68-lightsmart.desktop

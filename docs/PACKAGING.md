@@ -59,6 +59,55 @@ just a different one.
 `pip`/distro install path, which is what most keyboard-control tools do.
 Revisit option 3 once the GUI is stable.
 
+## Building it
+
+```sh
+snapcraft pack                 # needs LXD
+sudo snap install --dangerous --classic ./mk-k68-lightsmart_*.snap
+```
+
+Five things went wrong the first time this was built and installed, and
+four of them pack cleanly and only fail when run. They are worth
+knowing because every one of them will come back if the part is edited.
+
+**Qt's libraries have to be in the snap.** patchelf — which a classic
+snap needs, or its binaries keep build-time rpaths — also points every
+binary at the `core24` loader, and that loader searches the base snap,
+not the host. The host having `libGL.so.1` is irrelevant: importing
+`PySide6.QtGui` fails until `libgl1`, `libegl1`, `libx11-6`,
+`libfontconfig1`, the `xcb` family and the Wayland libraries are in
+`stage-packages`. That is most of the snap's 136 MB.
+
+**The venv records the build container's interpreter.** The python
+plugin builds in `/root/parts/tool/install`, so `pyvenv.cfg` says
+`home = /usr/bin` — a path that on the user's machine is either absent
+or a different Python entirely. `override-prime` rewrites it to the
+interpreter the snap ships.
+
+**The shebang has to name the venv's own `bin/python3`,** not the
+interpreter that symlink points at. Python reads `pyvenv.cfg`, and so
+finds `site-packages`, only when the executable it was *started as*
+lives inside the venv. Naming `usr/bin/python3.12` builds, installs,
+and then cannot import the application.
+
+**A desktop file in `snap/gui/` is installed twice.** Snapcraft copies
+everything under `snap/gui/` into `meta/gui`, and the app's `desktop:`
+key installs its own copy, so the app appears in the menu twice. The
+file lives in `desktop/` instead, and only the `desktop:` key ships it.
+
+**Rebuilds need cleaning.** Editing the part re-runs its build over the
+install directory the last one left, and `python -m venv` will not
+build a venv on top of a venv:
+
+```sh
+snapcraft clean tool && snapcraft pack     # after editing the part
+snapcraft clean && snapcraft pack          # after changing what ships
+```
+
+The second form matters because `prime` is not rebuilt from scratch
+otherwise: a file removed from the project stays in the snap, which is
+how the duplicate desktop entry survived its own fix.
+
 ## Branding and artwork
 
 The vendor UI is covered in the manufacturer's name and logo, and the
