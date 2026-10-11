@@ -112,25 +112,28 @@ class Frame:
         return cls([rgb for row in rows for rgb in row])
 
     def encode(self, brightness: int = 255) -> bytes:
-        """Pack to the wire form: three bytes per LED, B then G then R.
+        """Pack to the wire form: three bytes per LED, R then G then B.
 
-        On a little-endian host an ``array("I")`` of 0x00RRGGBB already
-        serialises as B, G, R, 0 -- so dropping every fourth byte gives
-        the wire order outright, and the brightness scale is one
-        ``translate`` over the whole frame. Both run in C.
+        The driver writes its pixel out low byte first (0x42A27C,
+        0x42A284, 0x42A290), and the pixel it holds is a Win32
+        ``COLORREF`` -- 0x00BBGGRR -- so what lands on the wire is R, G,
+        B. Confirmed on hardware: sending B, G, R put every green pixel
+        on the blue channel.
+
+        Byte-swapping an ``array("I")`` of 0x00RRGGBB makes it serialise
+        as 00, R, G, B, so dropping every fourth byte leaves the wire
+        order outright. That and the brightness ``translate`` both run
+        in C, which is what keeps a 941-frame encode off the stopwatch.
         """
         if not 0 <= brightness <= 255:
             raise ValueError("brightness is 0..255")
 
+        values = self.pixels
         if _LITTLE_ENDIAN:
-            raw = bytearray(self.pixels.tobytes())
-            del raw[3::4]
-        else:
-            raw = bytearray(FRAME_BYTES)
-            for i, rgb in enumerate(self.pixels):
-                raw[i * 3] = rgb & 0xFF
-                raw[i * 3 + 1] = (rgb >> 8) & 0xFF
-                raw[i * 3 + 2] = (rgb >> 16) & 0xFF
+            values = array("I", values)   # byteswap is in place; copy first
+            values.byteswap()
+        raw = bytearray(values.tobytes())
+        del raw[0::4]
 
         if brightness == 255:
             return bytes(raw)
@@ -175,12 +178,14 @@ class Animation:
             raise ValueError("an animation needs at least one frame")
 
         count = len(frames)
-        if self.boot:
-            header = struct.pack("<HH", count, speed_to_byte(self.speed))
-        else:
-            # The driver reserves two bytes here and fills in the frame
-            # count; the speed travels with the layer's own settings.
-            header = struct.pack("<H", count)
+        # Both commands take the same 4-byte header -- frame count then
+        # speed, each little-endian 16-bit. The animation path sets its
+        # first pixel offset to 4 (0x42A190) exactly as the boot path
+        # does, after writing the count at 0x42A11C and the speed at
+        # 0x42A187. Reading this as a 2-byte header shifted every pixel
+        # two bytes early, which the strip showed as a green/blue swap:
+        # the firmware had taken the first pixel's B and G for the speed.
+        header = struct.pack("<HH", count, speed_to_byte(self.speed))
 
         bright = brightness_to_byte(self.brightness)
         body = b"".join(f.encode(bright) for f in frames)
@@ -209,11 +214,18 @@ class Animation:
     def _blocks_for(data_len: int) -> int:
         """Blocks to announce and send for ``data_len`` bytes of data.
 
-        The driver's own count is ``(len >> 6) + 1`` (0x429CF3). It writes
-        the terminator into a buffer far larger than it sends, so for the
-        few lengths where ``len % 64 >= 62`` its magic falls outside the
-        transmitted range. We send one more block in that case, which keeps
-        the announced and streamed counts equal and the terminator intact.
+        The driver counts twice and can disagree with itself. It
+        announces ``((frames * 975 + 2) >> 6) + 1`` (0x42A0A0-0x42A0B1)
+        but hands the sender ``frames * 975 + 4`` (0x42A2B5), whose own
+        count is ``(len >> 6) + 1`` -- so at 4 frames, and every 64
+        frames after, it announces one block fewer than it streams. We
+        use the transmitted length for both, so the keyboard is told
+        exactly what it then receives.
+
+        The driver also writes the terminator into a buffer far larger
+        than it sends, so for the few lengths where ``len % 64 >= 62``
+        its magic falls outside the transmitted range. We send one more
+        block in that case, which keeps the terminator intact.
         """
         blocks = (data_len >> 6) + 1
         if data_len + 3 > blocks * BLOCK:

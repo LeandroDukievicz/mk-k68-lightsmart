@@ -38,9 +38,9 @@ first two; all configuration goes through the third:
 
 ## Status
 
-The transport is complete, and the per-key colour path is confirmed on
-real hardware. The bulk upload is implemented and tested against the
-encoder, but has never run on a device. The UI is one screen in.
+The transport is complete, and both lighting paths are confirmed on
+real hardware: per-key colour, and the dot-matrix upload. The UI is one
+screen in, and that screen now drives the strip.
 
 | Area | State |
 |---|---|
@@ -49,9 +49,9 @@ encoder, but has never run on a device. The UI is one screen in.
 | Transaction envelope | ✅ done |
 | Key table, all 69 LED indices | ✅ done |
 | Per-key colour | ✅ implemented, confirmed on hardware |
-| Built-in animations | ⚠️ framing right, some effect ids still wrong |
-| Dot-matrix frame upload | ⚠️ decoded and encoded; never yet run on a device |
-| Dot-matrix editor UI | 🚧 draws and paints, upload not wired |
+| Built-in animations | ⚠️ framing right, effect ids still unmapped |
+| Dot-matrix frame upload | ✅ confirmed on hardware |
+| Dot-matrix editor UI | ✅ paints, uploads, reports progress, cancels |
 | Key remapping, macros | 🔍 opcodes located, payloads not decoded |
 | Music-reactive, settings screens | ⬜ not started |
 
@@ -122,7 +122,11 @@ controls row.
 - The bottom-right corner shows the exact 16 bytes that were built, so
   you can watch the protocol as you click.
 - The status bar reports the device node, or why it could not be found.
-- Click or drag across the strip to paint it.
+- Click or drag across the strip to paint it, set a brightness, and
+  press Upload. A progress bar follows the blocks, and Cancel stops an
+  upload without leaving the keyboard mid-transaction.
+- Every transfer runs on a thread of its own, so the window stays live
+  through an upload that can take minutes.
 
 ---
 
@@ -142,6 +146,14 @@ Useful for protocol work, since it sends one packet at a time.
 
 # select a built-in animation
 ./mk-k68-lightsmart effect 0x06 00FFFF --brightness 12 --speed 8
+
+# upload one frame to the strip: a pattern built to expose mistakes
+./mk-k68-lightsmart strip test
+./mk-k68-lightsmart strip fill 00FF00 --brightness 40
+./mk-k68-lightsmart strip clear
+
+# walk the effect modes, recording what each one does
+./mk-k68-lightsmart effect-scan
 
 # send anything, and optionally read the reply
 ./mk-k68-lightsmart raw "04 18" --read
@@ -205,11 +217,17 @@ firmware's own limit, stated in the vendor manual too.
 04 F0                                      end
 ```
 
-`0x31` is the boot animation (134 frames max, 4-byte header of frame
-count then speed); `0x33` is an ordinary animation (941 max, 2-byte
-header). Pixels are **three bytes each in B, G, R order**, pre-scaled by
-brightness, 325 per frame = 975 bytes. LEDs are addressed row-first:
-`index = row * 65 + col`.
+`0x31` is the boot animation (134 frames max), `0x33` an ordinary one
+(941 max). Both take the same 4-byte header: frame count then speed,
+each little-endian 16-bit. Pixels are **three bytes each in R, G, B
+order**, pre-scaled by brightness, 325 per frame = 975 bytes. LEDs are
+addressed row-first: `index = row * 65 + col`.
+
+Reading the animation header as 2 bytes shifts every pixel two bytes
+early — the firmware takes the first pixel's two leading channels for
+the speed, and the strip shows what looks like a green/blue swap. That
+is how this was found; `docs/PROTOCOL.md` has the patterns that
+separate the two explanations.
 
 ---
 

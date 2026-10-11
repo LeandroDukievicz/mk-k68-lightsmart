@@ -95,10 +95,13 @@ class StripGeometry(unittest.TestCase):
 
 
 class FrameEncoding(unittest.TestCase):
-    def test_pixels_go_out_bgr(self):
+    def test_pixels_go_out_rgb(self):
+        # The driver emits its COLORREF low byte first (0x42A27C), which
+        # is R, G, B -- and the strip agrees: sent B, G, R, every green
+        # pixel came back blue.
         f = matrix.Frame()
         f[(0, 0)] = 0xFF8000           # R=FF G=80 B=00
-        self.assertEqual(f.encode(255)[:3], bytes((0x00, 0x80, 0xFF)))
+        self.assertEqual(f.encode(255)[:3], bytes((0xFF, 0x80, 0x00)))
 
     def test_frame_is_975_bytes(self):
         self.assertEqual(len(matrix.Frame().encode()), 975)
@@ -125,9 +128,19 @@ class AnimationPayload(unittest.TestCase):
         self.assertEqual(count, 3)
         self.assertEqual(speed, matrix.SPEED_BASE - 50)
 
-    def test_animation_header_is_count(self):
-        a = matrix.Animation(frames=self._frames(3))
-        self.assertEqual(struct.unpack("<H", a.payload()[:2])[0], 3)
+    def test_animation_header_is_count_then_speed_too(self):
+        # 0x42A190 starts the animation's pixels at offset 4, after the
+        # count (0x42A11C) and the speed (0x42A187) -- the same header
+        # the boot path writes, not a 2-byte one.
+        a = matrix.Animation(frames=self._frames(3), speed=50)
+        count, speed = struct.unpack("<HH", a.payload()[:4])
+        self.assertEqual(count, 3)
+        self.assertEqual(speed, matrix.SPEED_BASE - 50)
+
+    def test_an_animation_without_a_speed_sends_the_default(self):
+        a = matrix.Animation(frames=self._frames(1))
+        self.assertEqual(struct.unpack("<H", a.payload()[2:4])[0],
+                         matrix.DEFAULT_SPEED)
 
     def test_boot_block_count_matches_driver_arithmetic(self):
         # 134 frames: 134*975 + 4 = 130654; 130654>>6 = 2041; +1 = 2042
@@ -142,7 +155,7 @@ class AnimationPayload(unittest.TestCase):
     def test_magic_follows_the_data(self):
         # The driver leaves one spare byte and writes the magic at
         # end+1 (0x429EF5).
-        for boot, header in ((True, 4), (False, 2)):
+        for boot, header in ((True, 4), (False, 4)):
             for n in (1, 3, 64, 134):
                 a = matrix.Animation(frames=self._frames(n), boot=boot)
                 end = header + n * 975
@@ -154,7 +167,7 @@ class AnimationPayload(unittest.TestCase):
         # Regression: a bytearray *slice* assignment grows the buffer when
         # only one byte is free, which made the payload a non-multiple of
         # 64 and truncated the terminator. 51 and 21 are two such counts.
-        for boot, header in ((True, 4), (False, 2)):
+        for boot, header in ((True, 4), (False, 4)):
             limit = matrix.MAX_FRAMES_BOOT if boot else 400
             for n in range(1, limit + 1):
                 a = matrix.Animation(frames=self._frames(1) * n, boot=boot)
@@ -195,10 +208,10 @@ class AnimationPayload(unittest.TestCase):
         self.assertEqual(a.block_count(), len(a.payload()) // 64)
 
         a.frames[0][(0, 0)] = 0xFF0000
-        self.assertEqual(a.payload()[2:5], bytes((0x00, 0x00, 0xFF)))
+        self.assertEqual(a.payload()[4:7], bytes((0xFF, 0x00, 0x00)))
 
         a.brightness = 10
-        self.assertEqual(a.payload()[2:5], bytes((0x00, 0x00, 0x19)))
+        self.assertEqual(a.payload()[4:7], bytes((0x19, 0x00, 0x00)))
 
         a.boot = True
         self.assertEqual(a.command, matrix.CMD_BOOT_ANIMATION)

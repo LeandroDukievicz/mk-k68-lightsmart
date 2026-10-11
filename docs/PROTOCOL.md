@@ -220,7 +220,9 @@ can only set one key").
 
 ## 6. Dot-matrix strip
 
-**verified** geometry, **inferred** upload format.
+**verified** geometry, **verified** upload format — confirmed on
+hardware on 2026-10-11 with patterns built so that each possible mistake
+would look different on the strip.
 
 The strip is **65 columns x 5 rows = 325 LEDs**, measured off the
 editor screenshot in the manual (24 px pitch, 65 cells across, 5 down).
@@ -252,21 +254,54 @@ Spectrum, Tetris, Rain 1, Color, Rain 2.
 | | `0x31` boot logo | `0x33` animation |
 |---|---|---|
 | Frame cap | 134 (`cmovg`, `0x429CD5`) | 941 |
-| Header | 4 bytes: count LE16, speed LE16 | 2 bytes: count LE16 |
+| Header | 4 bytes: count LE16, speed LE16 | **the same 4 bytes** |
+| Count written at | `0x429D62` | `0x42A11C` |
+| Speed written at | `0x429DC9` | `0x42A187` |
+| First pixel offset | 4 | 4 (`0x42A190`) |
 
-Each frame is 325 LEDs × 3 bytes = **975 bytes**, written **B, G, R**
-(`0x429EBC`-`0x429ED0`), every channel pre-multiplied by
-`brightness / 255` (`0x429E56`, with 255.0f at `0x59353C`). Brightness
-reaches the encoder as `percent * 255 / 100`; the speed wire value is
-`0x66 - setting`, or `0x50` when the layer has none.
+Both commands take the same header. Reading the animation's as 2 bytes
+shifts every pixel two bytes early, and the firmware then takes the
+first pixel's two leading channels for the speed — on the strip that
+looks like a green/blue swap, which is how it was caught.
 
-`blocks = (len(data) >> 6) + 1` (`0x429CF3`). The terminator goes at
-`len(data) + 1` — the driver leaves one spare byte — via
-`mov word [ebx+edx+1], 0x55AA` (`0x429EF5`). The driver writes into a
-buffer far larger than it transmits, so for the handful of lengths where
-`len % 64 >= 62` its own magic lands outside the transmitted range; this
-implementation sends one extra block in that case so the terminator
-survives.
+Each frame is 325 LEDs × 3 bytes = **975 bytes**, written **R, G, B**.
+The driver stores the pixel's own bytes low-first (`0x42A27C`,
+`0x42A284`, `0x42A290`; `0x429EBC`-`0x429ED0` in the boot path), and the
+pixel it holds is a Win32 `COLORREF` — `0x00BBGGRR` — so R leads. Every
+channel is pre-multiplied by `brightness / 255` (`0x429E56`, with 255.0f
+at `0x59353C`); brightness reaches the encoder as `percent * 255 / 100`,
+and the speed wire value is `0x66 - setting`, or `0x50` when the layer
+has none.
+
+The driver counts blocks twice and can disagree with itself. It
+announces `((frames * 975 + 2) >> 6) + 1` (`0x42A095`-`0x42A0B1`) but
+hands the bulk sender `frames * 975 + 4` (`0x42A2B5`), which applies
+`(len >> 6) + 1` of its own — so at 4 frames, and every 64 frames after,
+it announces one block fewer than it streams. This implementation uses
+the transmitted length for both, so the keyboard is told exactly what it
+then receives.
+
+The terminator goes at `len(data) + 1` — the driver leaves one spare
+byte — via `mov word [ebx+edx+1], 0x55AA` (`0x42A2B8`, `0x429EF5`). The
+driver writes into a buffer far larger than it transmits, so for the
+handful of lengths where `len % 64 >= 62` its own magic lands outside
+the transmitted range; this implementation sends one extra block in that
+case so the terminator survives.
+
+### How it was confirmed
+
+`mk-k68-lightsmart strip test` uploads one frame whose rows carry
+different colours and whose columns ramp in brightness, with the first
+LED white. A channel-order mistake recolours the rows, a row/column
+mix-up turns the stripes vertical, a reversed column order runs the ramp
+backwards, and a wrong block count truncates the picture.
+
+The first pattern was ambiguous, and the ambiguity is worth recording:
+its rows were red, **green, blue**, **yellow, magenta**, and those two
+pairs are exactly what a green/blue swap maps onto each other — so a
+channel swap and a row swap looked identical. `strip probe` separates
+them: red and white rows on the left, which no green/blue swap can
+touch, and pure green on the right, which it must.
 
 ### The stock animations
 
@@ -278,8 +313,23 @@ t_led_frames(frames_id, layer_id, frameIndex, led_index, rgb_value)
 t_default_led_frames(...)   -- same shape
 ```
 
-`led_index` runs 0‥324 and `rgb_value` is `0x00RRGGBB`. Layer 1 is the
-boot logo with exactly 134 frames, which is where the cap comes from.
+`led_index` runs 0‥324 and `rgb_value` is `0x00RRGGBB` — the same form
+this project's `Frame` uses, so the stock animations need no conversion
+on the way in. The evidence is the palette itself: the colour that
+dominates the CPU, GPU and network-speed layers is `0x001D30`, which
+reads as the dark navy the app is themed in, and as a muddy brown the
+other way round.
+
+The driver's *in-memory* pixel is not that, though: the encoder writes
+it low byte first and the strip shows R first, so what it holds is a
+Win32 `COLORREF` (`0x00BBGGRR`). The app therefore swaps when it loads
+a layer. Only the wire order matters for talking to the keyboard, and
+that is R, G, B.
+
+Layer 1 is the boot logo with exactly 134 frames, which is where the
+cap comes from. The layer names are Chinese in the shipped database
+(`开机logo`, `CPU使用率`, `时间显示`, …); the English names come from
+`language/1033.lan`.
 
 ## 7. Macros
 
