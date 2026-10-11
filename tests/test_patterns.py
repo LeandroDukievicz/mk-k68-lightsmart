@@ -240,3 +240,89 @@ class TheCatalogue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheMeter(unittest.TestCase):
+    """The panel that shows what the AI tools have spent."""
+
+    def reading(self, tool="claude", **kw):
+        from mk_k68_lightsmart import usage
+        import time
+        fields = dict(tool=tool, tokens=2_500_000, context=600_000,
+                      context_window=1_000_000, plan_percent=None,
+                      plan_window_minutes=None, plan_long_percent=None,
+                      updated=time.time(), source=Path("x"))
+        fields.update(kw)
+        return usage.Reading(**fields)
+
+    def test_a_panel_each(self):
+        frames = patterns.meter([self.reading("claude"),
+                                 self.reading("codex", plan_percent=64.0)])
+        self.assertEqual(len(frames), 2)
+        self.assertNotEqual(list(frames[0].pixels), list(frames[1].pixels))
+
+    def test_frames_each_stretches_a_panel(self):
+        frames = patterns.meter([self.reading()], frames_each=30)
+        self.assertEqual(len(frames), 30)
+        self.assertEqual(list(frames[0].pixels), list(frames[-1].pixels))
+
+    def test_the_name_fills_with_the_context(self):
+        from mk_k68_lightsmart import font
+        empty = patterns.meter_screen(self.reading(context=0))
+        full = patterns.meter_screen(self.reading(context=1_000_000))
+        bright = patterns.METER_COLOURS["claude"][0]
+        lit = lambda f: sum(1 for p in f.pixels if p == bright)
+        self.assertGreater(lit(full), lit(empty),
+                           "the name should fill as the window does")
+
+    def test_each_tool_has_its_own_colour(self):
+        claude = patterns.meter_screen(self.reading("claude"))
+        codex = patterns.meter_screen(self.reading("codex"))
+        self.assertIn(patterns.METER_COLOURS["claude"][0], set(claude.pixels))
+        self.assertIn(patterns.METER_COLOURS["codex"][0], set(codex.pixels))
+
+    def test_a_session_that_is_over_is_drawn_grey(self):
+        stale = patterns.meter_screen(self.reading(updated=0.0))
+        self.assertIn(patterns.METER_IDLE[0], set(stale.pixels))
+        self.assertNotIn(patterns.METER_COLOURS["claude"][0], set(stale.pixels))
+
+    def test_a_tool_with_no_session_still_shows_its_name(self):
+        from mk_k68_lightsmart import usage
+        screen = patterns.meter_screen(usage.empty("codex"))
+        self.assertTrue(any(screen.pixels))
+
+    def test_nothing_to_show_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.meter([])
+
+    def test_a_nonsense_frame_count_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.meter([self.reading()], frames_each=0)
+
+
+class TheFont(unittest.TestCase):
+    def test_a_glyph_is_three_by_five(self):
+        from mk_k68_lightsmart import font
+        for character, rows in font._GLYPHS.items():
+            self.assertEqual(len(rows), font.GLYPH_HEIGHT, character)
+            for row in rows:
+                self.assertEqual(len(row), font.GLYPH_WIDTH, character)
+
+    def test_the_strip_holds_sixteen_characters(self):
+        from mk_k68_lightsmart import font
+        self.assertLessEqual(font.width("X" * 16), matrix.COLS)
+        self.assertGreater(font.width("X" * 17), matrix.COLS)
+
+    def test_text_past_the_edge_is_clipped_not_wrapped(self):
+        from mk_k68_lightsmart import font
+        frame = matrix.Frame()
+        font.draw(frame, "WWWW", matrix.COLS - 4, 0xFFFFFF)
+        # nothing may appear back at the left
+        self.assertFalse(any(frame[col, row] for col in range(4)
+                             for row in range(matrix.ROWS)))
+
+    def test_an_unknown_character_still_draws_something(self):
+        from mk_k68_lightsmart import font
+        frame = matrix.Frame()
+        font.draw(frame, "ç", 0, 0xFFFFFF)
+        self.assertTrue(any(frame.pixels))

@@ -346,6 +346,74 @@ def dino_run(frames: int | None = None, seed: int = 3,
     return out
 
 
+# -- the token meter ---------------------------------------------------
+
+#: Bright and dim for each tool, in its own colour.
+METER_COLOURS = {
+    "claude": (0xFF7A1A, 0x3A1A00),
+    "codex": (0x2E8BFF, 0x001A38),
+}
+#: What a tool with nothing running is drawn in.
+METER_IDLE = (0x606060, 0x141414)
+
+#: Seconds each tool is meant to hold the strip. How many frames that
+#: is depends on how fast the firmware plays them, which is why it is
+#: the caller's to decide.
+METER_SECONDS_EACH = 3
+
+
+def meter_screen(reading, label: str | None = None) -> Frame:
+    """One tool's panel: the name as a gauge, then its numbers.
+
+    The name doubles as the context bar -- it fills from the left in
+    proportion to how much of the window is in use -- which is the only
+    way to show a bar and a word in five rows. After it come the tokens
+    the session has spent and, where the tool records it, how much of
+    the plan's window has gone.
+    """
+    from . import font
+
+    name = (label or reading.tool).upper()
+    bright, dim = (METER_COLOURS.get(reading.tool, METER_IDLE)
+                   if reading.live else METER_IDLE)
+
+    frame = Frame()
+    x = 1
+    share = (reading.context_percent or 0) / 100.0
+    font.draw(frame, name, x, bright,
+              fill_to=x + round(font.width(name) * share), dim=dim)
+    x += font.width(name) + 3
+
+    from .usage import short
+
+    parts = [short(reading.tokens) if reading.found else "--"]
+    if reading.plan_percent is not None:
+        parts.append(f"{reading.plan_percent:.0f}%")
+    for part in parts:
+        if x + font.width(part) > COLS:
+            break
+        x = font.draw(frame, part, x, bright) + 4
+    return frame
+
+
+def meter(readings, frames_each: int = 1) -> list[Frame]:
+    """The tools in turn, one panel each.
+
+    ``frames_each`` is how many frames a panel holds. One is enough
+    when the firmware is playing slowly; more is how to stretch a panel
+    to a few seconds on a keyboard that plays fast.
+    """
+    if frames_each < 1:
+        raise ValueError("frames_each is 1 or more")
+    if not readings:
+        raise ValueError("nothing to show")
+    frames: list[Frame] = []
+    for reading in readings:
+        screen = meter_screen(reading)
+        frames.extend(Frame(screen.pixels) for _ in range(frames_each))
+    return frames
+
+
 #: What the UI and the CLI offer, by name.
 BUILT_INS: dict[str, str] = {
     "tetris": "Tetris — pieces falling in until the strip is a wall",

@@ -234,6 +234,47 @@ def cmd_vendor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_meter(args: argparse.Namespace) -> int:
+    """Show what the AI tools on this machine have spent.
+
+    Reads the transcripts Claude Code and Codex keep locally -- no
+    network, no login -- and puts a panel for each on the strip. With
+    --watch it keeps doing it, which is the only way a strip that plays
+    from its own memory can show a number that moves.
+    """
+    from . import patterns, usage
+
+    def once(kb) -> None:
+        readings = usage.read_all()
+        for reading in readings:
+            plan = ("--" if reading.plan_percent is None
+                    else f"{reading.plan_percent:.0f}%")
+            print(f"{reading.tool:>7}: {usage.short(reading.tokens):>6} tokens  "
+                  f"context {(reading.context_percent or 0):3.0f}%  plan {plan:>4}  "
+                  f"{'live' if reading.live else 'idle'}")
+        animation = matrix.Animation(
+            frames=patterns.meter(readings, frames_each=args.frames_each),
+            brightness=args.brightness,
+            speed=args.speed,
+        )
+        if args.dry_run:
+            print(f"dry run - {animation.block_count()} blocks, nothing sent")
+            return
+        kb.upload_animation(animation)
+
+    if args.dry_run:
+        once(None)
+        return 0
+
+    with protocol.Keyboard() as kb:
+        once(kb)
+        while args.watch:
+            time.sleep(args.watch)
+            print()
+            once(kb)
+    return 0
+
+
 def cmd_pattern(args: argparse.Namespace) -> int:
     """Upload one of the animations the program generates itself."""
     from . import patterns
@@ -443,6 +484,17 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--dwell", type=float, default=4.0,
                     help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
+
+    m = sub.add_parser(
+        "meter", help="put this machine's AI token usage on the strip")
+    m.add_argument("--watch", type=float, metavar="SECONDS",
+                   help="keep refreshing every SECONDS")
+    m.add_argument("--frames-each", type=int, default=1, dest="frames_each",
+                   help="frames per panel (default 1)")
+    m.add_argument("--brightness", type=int, default=100, help="0-100")
+    m.add_argument("--speed", type=int, help="1-100; omit for the default")
+    m.add_argument("--dry-run", action="store_true")
+    m.set_defaults(func=cmd_meter)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
     pt.add_argument("name", nargs="?",
