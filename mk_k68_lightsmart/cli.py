@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from . import layout, matrix, protocol
 from .transport import DeviceNotFound, KT68Transport, TransportError
@@ -180,6 +181,59 @@ def cmd_strip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vendor(args: argparse.Namespace) -> int:
+    """List or upload the stock animations from a vendor database.
+
+    The database is not shipped with this project; this reads one you
+    still have from the Windows installer. It is the only source of a
+    long, multi-frame upload, so it is also how the bulk path gets
+    exercised past a single frame.
+    """
+    animations = matrix.load_vendor_animations(args.db)
+    if args.layer is None:
+        print(f"{'layer':>5}  {'frames':>6}  {'blocks':>6}  name")
+        for lid, (name, animation) in sorted(animations.items()):
+            print(f"{lid:>5}  {len(animation.frames):>6}  "
+                  f"{animation.block_count():>6}  {name}")
+        return 0
+
+    found = animations.get(args.layer)
+    if found is None:
+        raise ValueError(
+            f"no layer {args.layer} in {args.db}; run without --layer to list"
+        )
+    name, animation = found
+    # Never the boot slot unless it is asked for by name: that one
+    # persists across a power cycle.
+    animation.boot = args.boot
+    if args.brightness is not None:
+        animation.brightness = args.brightness
+
+    blocks = animation.block_count()
+    print(f"layer         : {args.layer} ({name})")
+    print(f"frames        : {len(animation.frames)}")
+    print(f"target        : {'boot animation' if args.boot else 'animation'} "
+          f"(command {animation.command:#04x})")
+    print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
+    print(f"estimated     : {blocks * 0.015:.0f}s")
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    last = 0
+
+    def report(sent: int, total: int) -> None:
+        nonlocal last
+        if sent - last >= 128 or sent == total:
+            last = sent
+            print(f"\rsending       : {sent}/{total} blocks", end="", flush=True)
+
+    with protocol.Keyboard() as kb:
+        kb.upload_animation(animation, progress=report)
+    print()
+    return 0
+
+
 def cmd_effect_scan(args: argparse.Namespace) -> int:
     """Walk the effect modes one at a time, recording what each does.
 
@@ -187,11 +241,18 @@ def cmd_effect_scan(args: argparse.Namespace) -> int:
     so the mapping has to come off the hardware. This asks for what you
     saw and prints the table it builds, ready to paste.
     """
-    if not sys.stdin.isatty():
-        raise ValueError("effect-scan needs a terminal: it asks what you saw")
+    if not args.auto and not sys.stdin.isatty():
+        raise ValueError(
+            "effect-scan asks what you saw, so it needs a terminal. Run it "
+            "in one, or pass --auto to walk the modes on a timer instead"
+        )
 
     seen: list[tuple[int, str]] = []
     rgb = _parse_colour(args.colour)
+    if args.auto:
+        print(f"Walking modes {args.first:#04x}-{args.last:#04x}, "
+              f"{args.dwell:g}s each. Watch the keys and write down what "
+              f"each one does, in order.\n")
     try:
         with protocol.Keyboard() as kb:
             for mode in range(args.first, args.last + 1):
@@ -202,9 +263,17 @@ def cmd_effect_scan(args: argparse.Namespace) -> int:
                     note = f"rejected: {exc}"
                     print(f"{mode:#04x}  {note}")
                 else:
-                    note = input(f"{mode:#04x}  what did it do? ").strip()
-                    if note.lower() in ("q", "quit"):
-                        break
+                    if args.auto:
+                        # Numbered, so a narrated list can be lined up
+                        # with the modes afterwards without counting.
+                        n = mode - args.first + 1
+                        print(f"{n:>3}. {mode:#04x} sent", flush=True)
+                        time.sleep(args.dwell)
+                        note = ""
+                    else:
+                        note = input(f"{mode:#04x}  what did it do? ").strip()
+                        if note.lower() in ("q", "quit"):
+                            break
                 seen.append((mode, note or "-"))
     except (EOFError, KeyboardInterrupt):
         print()
@@ -273,7 +342,21 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--colour", default="FF0000")
     es.add_argument("--brightness", type=int, default=10)
     es.add_argument("--speed", type=int, default=8)
+    es.add_argument("--auto", action="store_true",
+                    help="walk the modes on a timer instead of asking")
+    es.add_argument("--dwell", type=float, default=4.0,
+                    help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
+
+    v = sub.add_parser(
+        "vendor", help="list or upload stock animations from a vendor database")
+    v.add_argument("--db", required=True, help="path to ledlayer_v1.data")
+    v.add_argument("--layer", type=int, help="layer id; omit to list them")
+    v.add_argument("--brightness", type=int, help="override, 0-100")
+    v.add_argument("--boot", action="store_true",
+                   help="write the boot slot, which persists")
+    v.add_argument("--dry-run", action="store_true")
+    v.set_defaults(func=cmd_vendor)
 
     args = p.parse_args(argv)
     try:
