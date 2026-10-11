@@ -388,7 +388,69 @@ cap comes from. The layer names are Chinese in the shipped database
 (`开机logo`, `CPU使用率`, `时间显示`, …); the English names come from
 `language/1033.lan`.
 
-## 7. Macros
+## 7. Key remapping
+
+**verified** addressing and envelope, **partly decoded** records —
+`fcn.00416F20`, bulk via `fcn.00455E50`.
+
+```
+04 18                               begin
+04 11 .. .. .. .. .. .. 09          announce the keymap block
+<694 bytes>                         the block itself
+04 02                               apply
+04 F0                               end
+```
+
+The block is a flat array of **4-byte records**, one per key slot, sent
+as 694 bytes (`0x2B6`, pushed at `0x4171DC`) out of a 780-byte buffer
+(`0x30C`, cleared at `0x416FA3`). A key's record starts at `slot * 4`
+(`[ebp + ebx*4 - 0x360]` throughout the fill loop). The `AA 55`
+terminator goes in at offset **574** (`0x4171D3`), past the records
+rather than at the end of the payload.
+
+`0x27` carries the Fn layer in the same shape, 684 bytes.
+
+### Slots
+
+A key's slot is **not** its LED index. The driver resolves it from the
+HID usage with a compiled switch (`fcn.00457490`): a 236-byte case
+index at `0x457A10` covering usages 4‥0xEF, and a jump table at
+`0x4578A0` whose arms each return a constant.
+
+Extracting it and laying it over the physical board shows the numbering
+is the keyboard matrix in reading order, 18 slots to a row:
+
+| row | starts at | |
+|---|---|---|
+| ``` ` ``` 1 2 3 … | 19 | Backspace is 103 |
+| Tab Q W E … | 37 | Del 119 |
+| Caps A S D … | 55 | Enter 85, PgUp 118 |
+| Shift Z X C … | 73 | ↑ 101, PgDn 121 |
+| Ctrl Win Alt … | 91 | arrows 99-102 |
+
+Esc is 1 and the slider switch is 124. All 69 keys of this board land
+on a slot of their own; the table is in `layout.REMAP_SLOTS`.
+
+### Records
+
+The action type comes from the editor's own record (`[esi+0x18]`) and
+decides the shape:
+
+| type | record | meaning |
+|---|---|---|
+| 1 | `05 03 00 00` | left as it is |
+| 2 | `02 <mod> <usage> 00` | another key; a modifier goes in byte 1 and byte 2 is cleared (`0x41728B`) |
+| 0xD | `07 <a> <b> <c>` | a three-parameter action, source fields `+0x1C`, `+0x20`, `+0x24` |
+| 3 | — | a macro, looked up by id in the macro list (`0x417310`) |
+
+Usages `0xF1`-`0xF3` and `0xD3` take their own branches (`0x4172B1`),
+writing the original key's usage into byte 2 and the special id into
+byte 3. Bytes 1 and 2 of an ordinary remap come out of `fcn.004588A0`,
+which is not decoded yet — so **nothing here writes a keymap to the
+keyboard**. A keymap is persistent, and a wrong one types the wrong
+letters until it is corrected.
+
+## 8. Macros
 
 **partly verified** — `fcn.00432D10`, bulk via `fcn.00455E50`
 
@@ -403,13 +465,15 @@ encoded one at a time; a key event emits the marker `0x50` followed by
 two bytes from the event record (`0x432F8F`). The full event encoding is
 not decoded yet.
 
-## 8. What is still open
+## 9. What is still open
 
 1. ~~Numeric ids for the lighting effects~~ — recovered from the
    driver's own list population; see §5. What `0x14` is remains open.
 2. Which of bytes 8-11 is brightness, speed, direction and
    random-colour, and their ranges.
-3. Key remap payload layout (`0x11`, `0x27`; 694 and 684 bytes).
+3. The rest of the remap record: what `fcn.004588A0` derives for
+   bytes 1 and 2, and the remaining action types. The addressing and
+   the envelope are settled; see §7.
 4. The macro event encoding beyond the `0x50` key marker.
 5. Meaning of sub-commands `0x17`, `0x19`, `0x20`, `0x23`, `0x35`,
    `0x61`, `0xF5`.

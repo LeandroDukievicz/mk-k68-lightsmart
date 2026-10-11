@@ -52,7 +52,8 @@ app's nine screens are built.
 | Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
-| Key remapping, macros | 🔍 opcodes located, payloads not decoded |
+| Key remapping | 🔍 slots and envelope decoded, records partly; nothing written to the keyboard yet |
+| Macros | 🔍 opcodes located, event encoding not decoded |
 | Music-reactive, settings screens | ⬜ not started |
 
 ---

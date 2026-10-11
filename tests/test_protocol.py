@@ -337,3 +337,40 @@ class ReportDescriptorParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RemapSlots(unittest.TestCase):
+    """The addressing of a key-remap block.
+
+    Extracted from the driver's own lookup rather than transcribed, so
+    what these check is that the extraction still describes a keyboard:
+    one slot per key, no collisions, and the matrix order the physical
+    layout has.
+    """
+
+    #: 694 bytes of 4-byte records (0x4171DC pushes 0x2B6).
+    BLOCK_BYTES = 694
+
+    def test_every_key_has_a_slot_of_its_own(self):
+        slots = [layout.remap_slot(k) for k in layout.KEYS]
+        self.assertEqual(len(slots), len(layout.KEYS))
+        self.assertEqual(len(set(slots)), len(slots))
+
+    def test_rows_start_eighteen_apart(self):
+        # The firmware's grid is 18 slots wide, which is what makes the
+        # extracted numbers a keyboard rather than an arbitrary order.
+        starts = [("Esc", 1), ("~", 19), ("Tab", 37), ("Caps", 55),
+                  ("LeftShift", 73), ("Control", 91)]
+        for ident, slot in starts:
+            self.assertEqual(layout.remap_slot(layout.BY_IDENT[ident]), slot,
+                             ident)
+
+    def test_a_row_runs_in_reading_order(self):
+        row = ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"]
+        slots = [layout.remap_slot(layout.BY_IDENT[k]) for k in row]
+        self.assertEqual(slots, list(range(slots[0], slots[0] + len(row))))
+
+    def test_every_record_fits_the_block(self):
+        for key in layout.KEYS:
+            end = layout.remap_slot(key) * 4 + 4
+            self.assertLessEqual(end, self.BLOCK_BYTES, key.ident)
