@@ -288,6 +288,29 @@ handful of lengths where `len % 64 >= 62` its own magic lands outside
 the transmitted range; this implementation sends one extra block in that
 case so the terminator survives.
 
+### An upload cannot be abandoned
+
+**verified** on hardware.
+
+Between the announce and the last block, the firmware takes *every*
+64-byte report as payload. There is no escape sequence: a `04 02` or a
+`04 F0` sent mid-stream is consumed as pixels like anything else, and
+until the announced count is met the keyboard answers `0x00` to
+everything.
+
+Measured: a 458-block upload stopped at block 128 left the device
+rejecting commands. Sending `04 18` repeatedly, 322 of them came back
+`0x00` — exactly the outstanding count, minus the handful of reports
+already spent on the failed attempts — and the next ones came back
+`0xFF`, busy, because the transaction was still open. `04 02` then
+`04 F0` closed it, and the command channel returned.
+
+So a cancelled or failed stream has to be *finished*, with blank blocks,
+and then applied and ended. That costs 15 ms a block like any other, so
+cancelling a long upload saves time but does not stop it dead. What the
+keyboard shows afterwards is the part that arrived, which is the price
+of getting the channel back.
+
 ### How it was confirmed
 
 `mk-k68-lightsmart strip test` uploads one frame whose rows carry

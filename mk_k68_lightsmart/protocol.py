@@ -40,6 +40,7 @@ from .transport import (
     ACK_OK,
     ACK_RETRY,
     REPORT_SIZE,
+    DeviceGone,
     KT68Transport,
     TransportError,
 )
@@ -200,7 +201,7 @@ class Keyboard:
         self.transaction(data_frame(mode, rgb, p8, brightness, speed, direction))
 
     # -- dot-matrix strip -----------------------------------------------
-    def upload_animation(self, animation, progress=None) -> int:
+    def upload_animation(self, animation, progress=None, drain=None) -> int:
         """Push an animation to the 65x5 strip.
 
         Mirrors the driver's bulk path: announce the block count, stream
@@ -208,8 +209,23 @@ class Keyboard:
         the duration -- unplugging it midway leaves the upload unfinished,
         which is what the vendor manual warns about.
 
+        **An upload cannot be abandoned.** Once the count is announced,
+        the firmware treats every report it receives as payload until it
+        has them all -- the ``04 02`` and ``04 F0`` that end any other
+        transaction are swallowed as pixels like everything else.
+        Measured: cancelling at block 128 of 458 left the keyboard
+        answering ``0x00`` to every command until exactly the 330
+        outstanding reports had been sent, and only then did ``04 02``,
+        ``04 F0`` bring the command channel back.
+
+        So a stream that stops early is *finished* with blank blocks
+        rather than cut short. That costs the same 15 ms a block, which
+        is the firmware's price for the cancel, not ours.
+
         ``progress`` is called with ``(chunk, total)`` as the payload goes
-        out, so a GUI can show a bar. Returns the chunks sent.
+        out, so a GUI can show a bar; raising from it is how a caller
+        cancels. ``drain`` is called with ``(sent, total)`` while the
+        blanks go out, and must not raise. Returns the chunks sent.
         """
         payload = animation.payload()
         if len(payload) % REPORT_SIZE:
@@ -226,17 +242,55 @@ class Keyboard:
             self._step(control(animation.command,
                                b8=blocks & 0xFF, b9=(blocks >> 8) & 0xFF))
             sent = 0
-            for i in range(blocks):
-                self.t.set_feature(
-                    payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
-                )
-                sent += 1
-                if progress is not None:
-                    progress(sent, blocks)
+            try:
+                for i in range(blocks):
+                    self.t.set_feature(
+                        payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
+                    )
+                    sent += 1
+                    if progress is not None:
+                        progress(sent, blocks)
+            except DeviceGone:
+                raise                      # nothing left to drain into
+            except BaseException:
+                # Cancelled, or the stream failed. Either way the count
+                # has to be met before the keyboard listens again.
+                self._drain_blocks(blocks - sent, drain)
+                self._apply_quietly()
+                raise
             self._step(control(SUB_APPLY))
         finally:
             self._end_quietly()
         return sent
+
+    def _drain_blocks(self, remaining: int, report=None) -> None:
+        """Feed the firmware the blocks it is still counting on.
+
+        Blank ones: the picture is being abandoned and only the count
+        matters. If a transfer fails here there is nothing further to
+        try -- the device is gone or wedged, and the caller's own error
+        is the one worth reporting, so this returns quietly.
+        """
+        blank = bytes(REPORT_SIZE)
+        for done in range(1, remaining + 1):
+            try:
+                self.t.set_feature(blank)
+            except TransportError:
+                return
+            if report is not None:
+                report(done, remaining)
+
+    def _apply_quietly(self) -> None:
+        """Apply, swallowing a secondary failure.
+
+        After a drain the keyboard wants its ``04 02`` before it will
+        answer anything else; what it then shows is half an animation,
+        which beats a keyboard that ignores the host.
+        """
+        try:
+            self._step(control(SUB_APPLY))
+        except TransportError:
+            pass
 
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.

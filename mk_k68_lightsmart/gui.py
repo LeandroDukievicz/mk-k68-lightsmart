@@ -1063,7 +1063,10 @@ class MainWindow(QMainWindow):
         # exactly what is *not* reading the queue.
         self.device.worker.cancel()
         self.cancel_button.setEnabled(False)
-        self.set_status("cancelling…")
+        # The worker reports what the cancel actually costs: the
+        # firmware counts blocks and will not listen again until it has
+        # them all, so stopping early still has to feed it the rest.
+        self.set_status("cancelling — the keyboard must be fed the rest…")
 
     def _set_uploading(self, on: bool) -> None:
         self._uploading = on

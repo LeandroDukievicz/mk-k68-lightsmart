@@ -156,20 +156,36 @@ class DeviceWorker(QObject):
 
         self._cancel.clear()
         last = 0
+        at_stop = {"sent": 0, "total": 0}
 
         def report(sent: int, total: int) -> None:
             nonlocal last
+            at_stop["sent"], at_stop["total"] = sent, total
             if self._cancel.is_set():
-                # Raising here unwinds through upload_animation's finally,
-                # so the 04 F0 still goes out and the keyboard does not
-                # sit on its loading screen.
+                # Raising here unwinds into upload_animation's drain: the
+                # firmware is still counting blocks and will not answer a
+                # command until it has them all, so stopping costs the
+                # same 15 ms each on the way out. Say so rather than look
+                # hung.
+                owed = total - sent
+                self.status.emit(
+                    f"cancelling — the keyboard still wants {owed} blocks "
+                    f"(~{owed * 0.015:.0f}s)", False
+                )
                 raise Cancelled
             if sent - last >= self.PROGRESS_EVERY or sent == total:
                 last = sent
                 self.progress.emit(sent, total)
 
+        def draining(done: int, remaining: int) -> None:
+            """Keep the bar moving while the blanks go out."""
+            if done % self.PROGRESS_EVERY and done != remaining:
+                return
+            total = at_stop["total"] or at_stop["sent"] + remaining
+            self.progress.emit(at_stop["sent"] + done, total)
+
         try:
-            self.kb.upload_animation(animation, progress=report)
+            self.kb.upload_animation(animation, progress=report, drain=draining)
         except Cancelled:
             self.status.emit("upload cancelled", False)
             self.upload_finished.emit(False)

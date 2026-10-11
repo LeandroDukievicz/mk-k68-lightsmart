@@ -123,8 +123,11 @@ controls row.
   you can watch the protocol as you click.
 - The status bar reports the device node, or why it could not be found.
 - Click or drag across the strip to paint it, set a brightness, and
-  press Upload. A progress bar follows the blocks, and Cancel stops an
-  upload without leaving the keyboard mid-transaction.
+  press Upload. A progress bar follows the blocks.
+- Cancel stops the picture, but not the transfer: the firmware counts
+  the blocks it was promised and ignores the host until it has them
+  all, so the rest go out blank. The status bar says how many are left
+  and how long that is.
 - Every transfer runs on a thread of its own, so the window stays live
   through an upload that can take minutes.
 

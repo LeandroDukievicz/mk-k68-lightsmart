@@ -217,19 +217,60 @@ class Uploads(WorkerCase):
         self.assertLessEqual(len(updates), blocks // 64 + 2)
         self.assertEqual(updates[-1], (blocks, blocks))
 
-    def test_cancelling_still_closes_the_transaction(self):
+    def test_cancelling_still_feeds_the_firmware_every_block(self):
+        """The one thing a cancel may not do is stop mid-count.
+
+        Measured on hardware: the firmware takes every report as payload
+        until the announced count is met, so a short stream leaves it
+        answering 0x00 to everything. Cancelling therefore sends blanks
+        for the rest, and only then applies and ends.
+        """
         w = self.make()
-        t = CancellingTransport(w, after=4)
+        t = CancellingTransport(w, after=4)   # cancels on the 2nd block
         w.kb = protocol.Keyboard(t)
 
         w.upload(self.one_frame())
 
-        # The keyboard must not be left inside an open transaction.
-        self.assertEqual(t.heads()[-1], "04 F0")
+        # 04 18, 04 33, 16 blocks, 04 02, 04 F0 -- the whole count.
+        self.assertEqual(len(t.sent), 20)
+        self.assertEqual(t.heads()[:2], ["04 18", "04 33"])
+        self.assertEqual(t.heads()[-2:], ["04 02", "04 F0"])
+        # Two real blocks went out, then blanks to make the count up.
+        self.assertEqual(t.sent[4:18], [bytes(transport.REPORT_SIZE)] * 14)
         self.assertEqual(self.events["upload_finished"], [(False,)])
-        self.assertEqual(self.events["status"], [("upload cancelled", False)])
-        # It stopped early: a full one-frame upload is 20 transfers.
-        self.assertLess(len(t.sent), 20)
+        self.assertEqual(
+            [text for text, _ in self.events["status"]][-1], "upload cancelled"
+        )
+        self.assertIn("still wants 14 blocks", self.events["status"][0][0])
+
+    def test_a_failed_block_is_drained_too(self):
+        # Same reason: the firmware is counting, and a transfer that
+        # failed partway still owes it the rest.
+        w = self.make()
+        t = FailingTransport(transport.TransportError("short write"), on=5)
+        w.kb = protocol.Keyboard(t)
+
+        w.upload(self.one_frame())
+
+        # 21 recorded, not 20: the fake notes the write that failed. A
+        # failed ioctl is taken not to have reached the keyboard, so the
+        # drain makes the count up from the two that did -- 16 blocks
+        # as far as the firmware is concerned.
+        self.assertEqual(len(t.sent), 21)
+        self.assertEqual(t.heads()[-2:], ["04 02", "04 F0"])
+        self.assertEqual(self.events["upload_finished"], [(False,)])
+
+    def test_a_vanished_device_is_not_drained_into(self):
+        # Nothing to feed: the node is gone, and 14,000 doomed ioctls
+        # would hold the worker for minutes.
+        w = self.make()
+        t = FailingTransport(transport.DeviceGone("unplugged"), on=5)
+        w.kb = protocol.Keyboard(t)
+
+        w.upload(self.one_frame())
+
+        self.assertEqual(len(t.sent), 6)   # ...up to the failure, then 04 F0
+        self.assertEqual(self.events["disconnected"], [("unplugged",)])
 
     def test_a_stale_cancel_does_not_kill_the_next_upload(self):
         t = FakeTransport()
@@ -257,6 +298,17 @@ class Uploads(WorkerCase):
         self.assertIsNone(w.kb)
         self.assertEqual(self.events["disconnected"], [("unplugged mid-upload",)])
         self.assertEqual(self.events["upload_finished"], [(False,)])
+
+    def test_progress_keeps_moving_while_it_drains(self):
+        # A long drain that showed a frozen bar would look like a hang.
+        w = self.make()
+        t = CancellingTransport(w, after=4)
+        w.kb = protocol.Keyboard(t)
+        w.PROGRESS_EVERY = 1
+
+        w.upload(self.one_frame())
+
+        self.assertEqual(self.events["progress"][-1], (16, 16))
 
 
 if __name__ == "__main__":
