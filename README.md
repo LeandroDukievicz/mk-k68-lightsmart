@@ -49,7 +49,7 @@ app's nine screens are built.
 | Transaction envelope | ✅ done |
 | Key table, all 69 LED indices | ✅ done |
 | Per-key colour | ✅ implemented, confirmed on hardware |
-| Built-in animations | ⚠️ 20 mode bytes recovered from the driver; parameters still inferred |
+| Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
 | Key remapping, macros | 🔍 opcodes located, payloads not decoded |

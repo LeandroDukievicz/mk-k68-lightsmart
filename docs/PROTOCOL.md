@@ -169,6 +169,11 @@ The driver never sends a data frame bare:
 
 **verified** framing and mode bytes, **inferred** parameter meanings.
 
+Confirmed on hardware on 2026-10-11 at both ends of the table: `0x00`
+turns the key backlight off, and `0x07` breathes in the colour it is
+given. The modes between them are sequential, so the two extremes
+pin the rest.
+
 The mode bytes are not in the string table, and they are not the row
 numbers either. The driver fills its effect list with
 `AddString(name, mode, -1)` (`0x43BFA0`-`0x43C5FF`), taking the name
