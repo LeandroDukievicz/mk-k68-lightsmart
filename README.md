@@ -39,8 +39,8 @@ first two; all configuration goes through the third:
 ## Status
 
 The transport is complete, and both lighting paths are confirmed on
-real hardware: per-key colour, and the dot-matrix upload. The UI is one
-screen in, and that screen now drives the strip.
+real hardware: per-key colour, and the dot-matrix upload. Two of the
+app's nine screens are built.
 
 | Area | State |
 |---|---|
@@ -51,7 +51,7 @@ screen in, and that screen now drives the strip.
 | Per-key colour | ✅ implemented, confirmed on hardware |
 | Built-in animations | ⚠️ framing right, effect ids still unmapped |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
-| Dot-matrix editor UI | ✅ paints, uploads, reports progress, cancels |
+| Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
 | Key remapping, macros | 🔍 opcodes located, payloads not decoded |
 | Music-reactive, settings screens | ⬜ not started |
 
@@ -127,6 +127,25 @@ controls row.
   upload without leaving the keyboard mid-transaction.
 - Every transfer runs on a thread of its own, so the window stays live
   through an upload that can take minutes.
+
+### The Matrix screen
+
+![The strip editor](docs/images/03-matrix.png)
+
+The strip's own screen. Frames are listed down the left; the selected
+one is the picture you paint on, and the whole list goes to the keyboard
+as one animation — up to the firmware's 941.
+
+- **Add**, **Duplicate**, **Delete**, **Clear this frame**.
+- **Play** previews the animation in the window. The pacing is local:
+  how the firmware turns its speed byte into a frame rate is not known
+  yet, so the preview is an approximation, not a simulation.
+- **Upload animation** streams the whole thing, with the same progress
+  bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
+  seconds.
+- **Import from a vendor database…** reads a `ledlayer_v1.data` you
+  still have from the Windows installer and loads one of its layers.
+  Nothing of the sort ships here.
 
 ---
 

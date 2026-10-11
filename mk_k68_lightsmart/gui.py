@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -23,10 +23,14 @@ from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QListWidget,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -78,6 +82,17 @@ class DotMatrixStrip(QWidget):
 
     def clear(self) -> None:
         self.pixels.clear()
+        self.update()
+
+    def load_frame(self, frame) -> None:
+        """Show a :class:`matrix.Frame`. Dark LEDs stay out of the dict."""
+        self.pixels = {
+            (index % MATRIX_COLS, index // MATRIX_COLS): QColor(
+                (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+            )
+            for index, rgb in enumerate(frame.pixels)
+            if rgb
+        }
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -276,6 +291,362 @@ class Card(QFrame):
         )
 
 
+class MatrixPage(QWidget):
+    """The strip's own screen: frames, a timeline, playback, upload.
+
+    The Home screen paints one still frame as a quick way to reach the
+    strip. This is the editor: a list of frames, each one editable, that
+    goes to the keyboard as a single animation.
+
+    It owns no device. Upload is a request the window forwards to the
+    worker thread, and progress comes back the same way.
+    """
+
+    upload_requested = Signal(object)
+    #: stop the upload in flight
+    cancel_requested = Signal()
+    #: a note for the window's status bar
+    status = Signal(str)
+
+    #: The vendor's own speed scale, which the wire value is derived from.
+    SPEED_MIN, SPEED_MAX = 1, 100
+
+    def __init__(self, current_colour, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._colour = current_colour
+        self.frames: list[matrix.Frame] = [matrix.Frame()]
+        self.current = 0
+        self._playing = False
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(12)
+
+        board = Card()
+        bl = QVBoxLayout(board)
+        bl.setContentsMargins(18, 14, 18, 14)
+        bl.setSpacing(10)
+
+        self.strip = DotMatrixStrip(cell=17)
+        self.strip.pixel_clicked.connect(self.on_pixel)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self.strip)
+        row.addStretch()
+        bl.addLayout(row)
+        bl.addLayout(self._build_transport())
+        lay.addWidget(board)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        body.addWidget(self._build_timeline())
+        body.addWidget(self._build_settings(), 1)
+        lay.addLayout(body, 1)
+
+        self._refresh_timeline()
+
+    # -- construction ---------------------------------------------------
+    def _build_transport(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch()
+
+        self.frame_label = QLabel()
+        self.frame_label.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+        row.addWidget(self.frame_label)
+
+        self.play_button = ghost_button("▶  Play", self.toggle_play)
+        row.addWidget(self.play_button)
+
+        self.upload_progress = QProgressBar()
+        self.upload_progress.setFixedWidth(170)
+        self.upload_progress.setFixedHeight(16)
+        self.upload_progress.setTextVisible(False)
+        self.upload_progress.setVisible(False)
+        self.upload_progress.setStyleSheet(
+            "QProgressBar { background:#0a2444; border:1px solid #0d3a6b;"
+            " border-radius:3px; }"
+            "QProgressBar::chunk { background:#10a9fd; border-radius:2px; }"
+        )
+        row.addWidget(self.upload_progress)
+
+        self.cancel_button = ghost_button("Cancel", self.cancel)
+        self.cancel_button.setVisible(False)
+        row.addWidget(self.cancel_button)
+
+        self.upload_button = primary_button("Upload animation", self.upload)
+        self.upload_button.setEnabled(False)
+        row.addWidget(self.upload_button)
+        row.addStretch()
+        return row
+
+    def _build_timeline(self) -> QWidget:
+        card = Card()
+        card.setFixedWidth(210)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+
+        title = QLabel("Frames")
+        title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
+        lay.addWidget(title)
+
+        self.timeline = QListWidget()
+        self.timeline.setStyleSheet(
+            "QListWidget { background:#061a33; color:#9fb3d0; border:1px solid"
+            " #0d3a6b; border-radius:3px; font-size:11px; }"
+            "QListWidget::item { padding:4px 6px; }"
+            "QListWidget::item:selected { background:#0a3568; color:#cfe3ff; }"
+        )
+        self.timeline.currentRowChanged.connect(self.select_frame)
+        lay.addWidget(self.timeline, 1)
+
+        for text, slot in (("Add", self.add_frame),
+                           ("Duplicate", self.duplicate_frame),
+                           ("Delete", self.delete_frame),
+                           ("Clear this frame", self.clear_frame)):
+            lay.addWidget(ghost_button(text, slot))
+        return card
+
+    def _build_settings(self) -> QWidget:
+        card = Card()
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(10)
+
+        def caption(text: str) -> QLabel:
+            lb = QLabel(text)
+            lb.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+            return lb
+
+        title = QLabel("Animation")
+        title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
+        lay.addWidget(title)
+
+        speed = QHBoxLayout()
+        speed.addWidget(caption("Speed"))
+        self.speed = QSlider(Qt.Horizontal)
+        self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
+        self.speed.setValue(50)
+        self.speed.setFixedWidth(160)
+        self.speed.valueChanged.connect(self._speed_changed)
+        speed.addWidget(self.speed)
+        self.speed_label = caption("")
+        speed.addWidget(self.speed_label)
+        speed.addStretch()
+        lay.addLayout(speed)
+
+        bright = QHBoxLayout()
+        bright.addWidget(caption("Brightness"))
+        self.brightness = QSlider(Qt.Horizontal)
+        self.brightness.setRange(0, 100)
+        self.brightness.setValue(100)
+        self.brightness.setFixedWidth(160)
+        bright.addWidget(self.brightness)
+        bright.addStretch()
+        lay.addLayout(bright)
+
+        lay.addWidget(ghost_button("Import from a vendor database…",
+                                   self.import_vendor))
+
+        note = QLabel(
+            "Frames go to the keyboard as one animation, up to "
+            f"{matrix.MAX_FRAMES_ANIMATION}. Painting uses the colour "
+            "picked on the Home screen."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+        lay.addWidget(note)
+        lay.addStretch()
+        self._speed_changed(self.speed.value())
+        return card
+
+    # -- frames ---------------------------------------------------------
+    def _refresh_timeline(self) -> None:
+        """Rebuild the list and show the current frame.
+
+        The signal is blocked while the rows are replaced: rebuilding
+        emits currentRowChanged, which would select frame 0 behind the
+        caller's back.
+        """
+        blocked = self.timeline.blockSignals(True)
+        self.timeline.clear()
+        for i in range(len(self.frames)):
+            self.timeline.addItem(f"Frame {i + 1}")
+        self.timeline.setCurrentRow(self.current)
+        self.timeline.blockSignals(blocked)
+        self._show_current()
+
+    def _show_current(self) -> None:
+        self.strip.load_frame(self.frames[self.current])
+        self.frame_label.setText(
+            f"frame {self.current + 1} of {len(self.frames)}"
+        )
+
+    def select_frame(self, row: int) -> None:
+        if 0 <= row < len(self.frames):
+            self.current = row
+            self._show_current()
+
+    def add_frame(self) -> None:
+        if not self._room_for_one_more():
+            return
+        self.frames.insert(self.current + 1, matrix.Frame())
+        self.current += 1
+        self._refresh_timeline()
+
+    def duplicate_frame(self) -> None:
+        if not self._room_for_one_more():
+            return
+        copy = matrix.Frame(self.frames[self.current].pixels)
+        self.frames.insert(self.current + 1, copy)
+        self.current += 1
+        self._refresh_timeline()
+
+    def delete_frame(self) -> None:
+        if len(self.frames) == 1:
+            # An animation needs a frame; clearing is what was meant.
+            self.clear_frame()
+            return
+        del self.frames[self.current]
+        self.current = min(self.current, len(self.frames) - 1)
+        self._refresh_timeline()
+
+    def clear_frame(self) -> None:
+        self.frames[self.current] = matrix.Frame()
+        self._show_current()
+
+    def _room_for_one_more(self) -> bool:
+        if len(self.frames) < matrix.MAX_FRAMES_ANIMATION:
+            return True
+        self.status.emit(
+            f"the keyboard takes {matrix.MAX_FRAMES_ANIMATION} frames at most"
+        )
+        return False
+
+    def on_pixel(self, col: int, row: int) -> None:
+        colour = self._colour()
+        self.frames[self.current][col, row] = colour.rgb() & 0xFFFFFF
+        self.strip.pixels[(col, row)] = QColor(colour)
+        self.strip.update()
+
+    # -- playback -------------------------------------------------------
+    def _speed_changed(self, value: int) -> None:
+        self.speed_label.setText(f"{self._interval_ms(value)} ms/frame")
+        if self._playing:
+            self._timer.setInterval(self._interval_ms(value))
+
+    @staticmethod
+    def _interval_ms(speed: int) -> int:
+        """Preview pacing, from the same 1..100 the keyboard is sent.
+
+        This is the local preview only: how the firmware turns its speed
+        byte into a frame rate is not known, so the two need not agree.
+        """
+        return max(20, 420 - 4 * speed)
+
+    def toggle_play(self) -> None:
+        if self._playing:
+            self.stop()
+            return
+        if len(self.frames) < 2:
+            self.status.emit("one frame is a still picture — add another")
+            return
+        self._playing = True
+        self.play_button.setText("■  Stop")
+        self._timer.start(self._interval_ms(self.speed.value()))
+
+    def stop(self) -> None:
+        self._playing = False
+        self._timer.stop()
+        self.play_button.setText("▶  Play")
+
+    def _tick(self) -> None:
+        self.current = (self.current + 1) % len(self.frames)
+        blocked = self.timeline.blockSignals(True)
+        self.timeline.setCurrentRow(self.current)
+        self.timeline.blockSignals(blocked)
+        self._show_current()
+
+    # -- device ---------------------------------------------------------
+    def animation(self) -> matrix.Animation:
+        return matrix.Animation(
+            frames=list(self.frames),
+            speed=self.speed.value(),
+            brightness=self.brightness.value(),
+        )
+
+    def upload(self) -> None:
+        self.stop()
+        self.upload_requested.emit(self.animation())
+
+    def cancel(self) -> None:
+        self.cancel_button.setEnabled(False)
+        self.cancel_requested.emit()
+
+    def set_connected(self, connected: bool) -> None:
+        self.upload_button.setEnabled(connected)
+
+    def set_uploading(self, on: bool, connected: bool = True) -> None:
+        self.upload_button.setEnabled(connected and not on)
+        self.upload_progress.setVisible(on)
+        self.cancel_button.setVisible(on)
+        self.cancel_button.setEnabled(on)
+
+    def set_progress(self, sent: int, total: int) -> None:
+        if self.upload_progress.maximum() != total:
+            self.upload_progress.setRange(0, total)
+        self.upload_progress.setValue(sent)
+
+    # -- import ---------------------------------------------------------
+    def import_vendor(self) -> None:
+        """Load one layer out of a vendor animation database.
+
+        The database is the manufacturer's and is not shipped here; this
+        reads a copy the user already has.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open a vendor animation database", "",
+            "Animation store (*.data);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            animations = matrix.load_vendor_animations(path)
+        except Exception as exc:                 # sqlite3 or a bad file
+            QMessageBox.warning(self, "Could not read that file", str(exc))
+            return
+        if not animations:
+            QMessageBox.warning(self, "Nothing to import",
+                                "That database holds no animations.")
+            return
+
+        labels = [
+            f"{lid}: {name} ({len(a.frames)} frames)"
+            for lid, (name, a) in sorted(animations.items())
+        ]
+        chosen, ok = QInputDialog.getItem(
+            self, "Import an animation", "Layer:", labels, 0, False
+        )
+        if not ok:
+            return
+        lid = int(chosen.split(":", 1)[0])
+        name, animation = animations[lid]
+        self.stop()
+        self.frames = animation.frames or [matrix.Frame()]
+        self.current = 0
+        if animation.speed is not None:
+            self.speed.setValue(
+                max(self.SPEED_MIN, min(self.SPEED_MAX, animation.speed))
+            )
+        self.brightness.setValue(max(0, min(100, animation.brightness)))
+        self._refresh_timeline()
+        self.status.emit(f"imported {name} — {len(self.frames)} frames")
+
+
 class MainWindow(QMainWindow):
     #: Requests for the device, emitted from this thread and delivered on
     #: the worker's. Qt queues them, which is also what keeps two
@@ -323,8 +694,15 @@ class MainWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_home())
-        for _ in range(len(self.NAV) - 1):
+        # Matrix is the last rail entry and has a page of its own; the
+        # sections between it and Home are still to come.
+        for _ in range(len(self.NAV) - 2):
             self.pages.addWidget(self._build_placeholder())
+        self.matrix_page = MatrixPage(lambda: self.colour)
+        self.matrix_page.upload_requested.connect(self.start_upload)
+        self.matrix_page.cancel_requested.connect(self.cancel_upload)
+        self.matrix_page.status.connect(self.set_status)
+        self.pages.addWidget(self.matrix_page)
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
 
@@ -601,6 +979,7 @@ class MainWindow(QMainWindow):
     def on_connected(self, path: str) -> None:
         self._connected = True
         self.upload_button.setEnabled(not self._uploading)
+        self.matrix_page.set_connected(not self._uploading)
         self.set_status(f"connected — {path}", ok=True)
 
     def on_disconnected(self, why: str) -> None:
@@ -608,12 +987,14 @@ class MainWindow(QMainWindow):
         if self._uploading:
             self._set_uploading(False)
         self.upload_button.setEnabled(False)
+        self.matrix_page.set_connected(False)
         self.set_status(
             f"{why} — plug it in by cable, wired mode, then press Setup",
             ok=False,
         )
 
     def closeEvent(self, event) -> None:
+        self.matrix_page.stop()
         # Cancels any upload, then joins the thread, so the descriptor is
         # closed by the thread that opened it.
         if not self.device.stop():
@@ -661,16 +1042,20 @@ class MainWindow(QMainWindow):
         )
 
     def upload_strip(self) -> None:
-        animation = self.strip_animation()
+        self.start_upload(self.strip_animation())
+
+    def start_upload(self, animation) -> None:
+        """Send an animation, from whichever screen built it."""
         try:
             blocks = animation.block_count()
         except ValueError as exc:
             self.set_status(f"nothing to upload: {exc}", ok=False)
             return
         self._set_uploading(True)
-        self.upload_progress.setRange(0, blocks)
-        self.upload_progress.setValue(0)
-        self.set_status(f"uploading {blocks} blocks to the strip…")
+        self.on_progress(0, blocks)
+        self.set_status(
+            f"uploading {len(animation.frames)} frame(s), {blocks} blocks…"
+        )
         self.request_upload.emit(animation)
 
     def cancel_upload(self) -> None:
@@ -687,11 +1072,13 @@ class MainWindow(QMainWindow):
         self.upload_progress.setVisible(on)
         self.cancel_button.setVisible(on)
         self.cancel_button.setEnabled(on)
+        self.matrix_page.set_uploading(on, self._connected)
 
     def on_progress(self, sent: int, total: int) -> None:
-        if self.upload_progress.maximum() != total:
-            self.upload_progress.setRange(0, total)
-        self.upload_progress.setValue(sent)
+        for bar in (self.upload_progress, self.matrix_page.upload_progress):
+            if bar.maximum() != total:
+                bar.setRange(0, total)
+            bar.setValue(sent)
 
     def on_upload_finished(self, ok: bool) -> None:
         # The worker has already said what happened; this only hands the
