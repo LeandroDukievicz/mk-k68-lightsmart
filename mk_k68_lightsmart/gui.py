@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSlider,
     QStackedWidget,
@@ -35,8 +36,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import layout as kb_layout
-from . import protocol
-from .transport import DeviceGone, DeviceNotFound, TransportError
+from . import matrix, protocol
+from .worker import DeviceThread
 
 # -- palette, sampled from the vendor screenshots -----------------------
 BG = QColor("#050b24")
@@ -232,6 +233,35 @@ class SidebarButton(QPushButton):
         p.drawText(QRectF(0, 26, self.width(), 18), Qt.AlignCenter, self.caption)
 
 
+def primary_button(text: str, on_click) -> QPushButton:
+    """The accented action button, as the vendor UI draws it."""
+    b = QPushButton(text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setStyleSheet(
+        "QPushButton { background:#10a9fd; color:#04121f; border:none;"
+        " border-radius:3px; padding:7px 16px; font-weight:bold; font-size:11px; }"
+        "QPushButton:hover { background:#3dbdff; }"
+        "QPushButton:disabled { background:#123a5c; color:#5b7894; }"
+    )
+    b.clicked.connect(on_click)
+    return b
+
+
+def ghost_button(text: str, on_click) -> QPushButton:
+    """A quieter button, for what sits beside a primary one."""
+    b = QPushButton(text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setStyleSheet(
+        "QPushButton { background:transparent; color:#9fb3d0;"
+        " border:1px solid #0d3a6b; border-radius:3px; padding:6px 14px;"
+        " font-size:11px; }"
+        "QPushButton:hover { color:#cfe3ff; border-color:#10a9fd; }"
+        "QPushButton:disabled { color:#44607f; border-color:#0a2748; }"
+    )
+    b.clicked.connect(on_click)
+    return b
+
+
 class Card(QFrame):
     """A bordered panel in the content area."""
 
@@ -247,6 +277,14 @@ class Card(QFrame):
 
 
 class MainWindow(QMainWindow):
+    #: Requests for the device, emitted from this thread and delivered on
+    #: the worker's. Qt queues them, which is also what keeps two
+    #: transfers from interleaving on the wire.
+    request_open = Signal()
+    request_key = Signal(int, int, int, int)
+    request_effect = Signal(int, int, int, int, int, int)
+    request_upload = Signal(object)
+
     NAV = [
         ("⌂", "Home"),
         ("⌨", "Keys"),
@@ -262,8 +300,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MK-K68-LightSmart")
         self.resize(1268, 620)
-        self.kb: protocol.Keyboard | None = None
         self.colour = QColor("#ff0000")
+        # The keyboard is 140 ms per key and minutes per animation, so it
+        # lives on its own thread; this window only sends and listens.
+        self.device = DeviceThread()
+        self._connected = False
+        self._uploading = False
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -287,7 +329,10 @@ class MainWindow(QMainWindow):
         outer.addLayout(body, 1)
 
         outer.addWidget(self._build_statusbar())
-        self.connect_device()
+
+        self._wire_device()
+        self.set_status("looking for the keyboard…")
+        self.device.start()
 
     # -- chrome ---------------------------------------------------------
     def _build_topbar(self) -> QWidget:
@@ -345,6 +390,8 @@ class MainWindow(QMainWindow):
         lay.addStretch()
         gear = SidebarButton("⚙", "Setup")
         gear.setCheckable(False)
+        gear.setToolTip("Look for the keyboard again")
+        gear.clicked.connect(self.reconnect)
         lay.addWidget(gear)
         return side
 
@@ -384,6 +431,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.strip)
         row.addStretch()
         bl.addLayout(row)
+        bl.addLayout(self._build_strip_controls())
 
         self.keyboard = KeyboardView()
         self.keyboard.key_clicked.connect(self.on_key)
@@ -451,16 +499,56 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        apply_effect = QPushButton("Apply effect")
-        apply_effect.setCursor(Qt.PointingHandCursor)
-        apply_effect.setStyleSheet(
-            "QPushButton { background:#10a9fd; color:#04121f; border:none;"
-            " border-radius:3px; padding:7px 16px; font-weight:bold; font-size:11px; }"
-            "QPushButton:hover { background:#3dbdff; }"
-        )
-        apply_effect.clicked.connect(self.apply_effect)
-        lay.addWidget(apply_effect)
+        lay.addWidget(primary_button("Apply effect", self.apply_effect))
         return card
+
+    def _build_strip_controls(self) -> QHBoxLayout:
+        """Brightness, upload, progress and cancel, under the strip.
+
+        The strip is the one surface that is *edited* rather than driven:
+        clicking a cell changes a drawing here, and nothing reaches the
+        keyboard until Upload sends the whole frame.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch()
+
+        cap = QLabel("Strip brightness")
+        cap.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+        row.addWidget(cap)
+
+        self.strip_brightness = QSlider(Qt.Horizontal)
+        self.strip_brightness.setRange(0, 100)
+        self.strip_brightness.setValue(100)
+        self.strip_brightness.setFixedWidth(110)
+        self.strip_brightness.setToolTip("Scales every pixel on upload, 0-100%")
+        row.addWidget(self.strip_brightness)
+
+        self.upload_progress = QProgressBar()
+        self.upload_progress.setFixedWidth(170)
+        self.upload_progress.setFixedHeight(16)
+        self.upload_progress.setTextVisible(False)
+        self.upload_progress.setVisible(False)
+        self.upload_progress.setStyleSheet(
+            "QProgressBar { background:#0a2444; border:1px solid #0d3a6b;"
+            " border-radius:3px; }"
+            "QProgressBar::chunk { background:#10a9fd; border-radius:2px; }"
+        )
+        row.addWidget(self.upload_progress)
+
+        self.cancel_button = ghost_button("Cancel", self.cancel_upload)
+        self.cancel_button.setVisible(False)
+        row.addWidget(self.cancel_button)
+
+        self.clear_button = ghost_button("Clear", self.clear_strip)
+        row.addWidget(self.clear_button)
+
+        self.upload_button = primary_button("Upload to strip", self.upload_strip)
+        self.upload_button.setEnabled(False)
+        row.addWidget(self.upload_button)
+
+        row.addStretch()
+        return row
 
     def _build_placeholder(self) -> QWidget:
         page = QWidget()
@@ -489,74 +577,126 @@ class MainWindow(QMainWindow):
             self.colour = picked
             self._paint_swatch()
 
-    def connect_device(self) -> None:
-        if self.kb is not None:
-            self.kb.close()
-            self.kb = None
-        try:
-            self.kb = protocol.Keyboard()
-            self.set_status(f"connected — {self.kb.t.path}", ok=True)
-        except (DeviceNotFound, TransportError) as exc:
-            self.kb = None
-            self.set_status(str(exc), ok=False)
+    # -- the device, which lives on the worker thread --------------------
+    def _wire_device(self) -> None:
+        w = self.device.worker
+        w.connected.connect(self.on_connected)
+        w.disconnected.connect(self.on_disconnected)
+        w.status.connect(self.set_status)
+        w.key_applied.connect(self.on_key_applied)
+        w.progress.connect(self.on_progress)
+        w.upload_finished.connect(self.on_upload_finished)
+        # These cross into the worker's thread, so Qt queues them and the
+        # worker runs them one after another -- which is also what keeps
+        # two transfers from interleaving on the wire.
+        self.request_open.connect(w.open)
+        self.request_key.connect(w.set_key_colour)
+        self.request_effect.connect(w.set_effect)
+        self.request_upload.connect(w.upload)
+
+    def reconnect(self) -> None:
+        self.set_status("looking for the keyboard…")
+        self.request_open.emit()
+
+    def on_connected(self, path: str) -> None:
+        self._connected = True
+        self.upload_button.setEnabled(not self._uploading)
+        self.set_status(f"connected — {path}", ok=True)
+
+    def on_disconnected(self, why: str) -> None:
+        self._connected = False
+        if self._uploading:
+            self._set_uploading(False)
+        self.upload_button.setEnabled(False)
+        self.set_status(
+            f"{why} — plug it in by cable, wired mode, then press Setup",
+            ok=False,
+        )
 
     def closeEvent(self, event) -> None:
-        if self.kb is not None:
-            self.kb.close()
-            self.kb = None
+        # Cancels any upload, then joins the thread, so the descriptor is
+        # closed by the thread that opened it.
+        if not self.device.stop():
+            print("device thread would not stop; terminated it", file=sys.stderr)
         super().closeEvent(event)
 
-    def set_status(self, text: str, ok: bool) -> None:
-        colour = "#3ddc84" if ok else "#ff6b6b"
+    def set_status(self, text: str, ok: bool | None = None) -> None:
+        """Report. ``ok`` left out is a neutral note, not an outcome."""
+        colour = MUTED.name() if ok is None else ("#3ddc84" if ok else "#ff6b6b")
         self.status.setText(text)
         self.status.setStyleSheet(f"color: {colour}; font-size: 11px;")
 
-    def _send(self, what: str, fn) -> bool:
-        """Run a device call, reporting the outcome. True if it landed."""
-        if self.kb is None:
-            self.set_status(
-                "no keyboard — plug it in by cable, wired mode, "
-                "then press Setup",
-                ok=False,
-            )
-            return False
-        try:
-            fn()
-        except DeviceGone as exc:
-            # The transport already closed itself; drop the handle so the
-            # next attempt -- or the Setup button -- can reconnect.
-            self.kb = None
-            self.set_status(f"{exc}. Press Setup to look again.", ok=False)
-            return False
-        except TransportError as exc:
-            self.set_status(f"{what} failed: {exc}", ok=False)
-            return False
-        self.set_status(f"{what} sent", ok=True)
-        return True
-
+    # -- home screen ----------------------------------------------------
     def on_key(self, key: kb_layout.Key) -> None:
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             protocol.MODE_SINGLE_KEY, rgb, p8=key.light_index, p10=0x0F, p11=0x0F
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
-        # Paint only once the keyboard has taken it, so the picture cannot
-        # claim a colour the hardware never got.
-        landed = self._send(
-            f"{key.ident} → {self.colour.name()}",
-            lambda: self.kb.set_key_colour(key.light_index, rgb),
+        self.request_key.emit(key.light_index, *rgb)
+
+    def on_key_applied(self, light_index: int, rgb: int) -> None:
+        """Paint a key only once the keyboard has taken its colour."""
+        self.keyboard.colours[light_index] = QColor(
+            (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
         )
-        if landed:
-            self.keyboard.colours[key.light_index] = QColor(self.colour)
-            self.keyboard.update()
+        self.keyboard.update()
 
     def on_pixel(self, col: int, row: int) -> None:
         self.strip.pixels[(col, row)] = QColor(self.colour)
         self.strip.update()
-        self.status.setText(
-            f"strip pixel ({col},{row}) — upload format not decoded yet"
+        self.set_status(f"strip ({col},{row}) painted — Upload sends the frame")
+
+    def clear_strip(self) -> None:
+        self.strip.clear()
+        self.set_status("strip cleared here — Upload sends the blank frame")
+
+    def strip_animation(self) -> matrix.Animation:
+        """What the editor shows, as a one-frame animation."""
+        frame = matrix.Frame()
+        for (col, row), colour in self.strip.pixels.items():
+            frame[col, row] = colour.rgb() & 0xFFFFFF
+        return matrix.Animation(
+            frames=[frame], brightness=self.strip_brightness.value()
         )
-        self.status.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+
+    def upload_strip(self) -> None:
+        animation = self.strip_animation()
+        try:
+            blocks = animation.block_count()
+        except ValueError as exc:
+            self.set_status(f"nothing to upload: {exc}", ok=False)
+            return
+        self._set_uploading(True)
+        self.upload_progress.setRange(0, blocks)
+        self.upload_progress.setValue(0)
+        self.set_status(f"uploading {blocks} blocks to the strip…")
+        self.request_upload.emit(animation)
+
+    def cancel_upload(self) -> None:
+        # Through an Event, not the queue: an upload in progress is
+        # exactly what is *not* reading the queue.
+        self.device.worker.cancel()
+        self.cancel_button.setEnabled(False)
+        self.set_status("cancelling…")
+
+    def _set_uploading(self, on: bool) -> None:
+        self._uploading = on
+        self.upload_button.setEnabled(self._connected and not on)
+        self.clear_button.setEnabled(not on)
+        self.upload_progress.setVisible(on)
+        self.cancel_button.setVisible(on)
+        self.cancel_button.setEnabled(on)
+
+    def on_progress(self, sent: int, total: int) -> None:
+        if self.upload_progress.maximum() != total:
+            self.upload_progress.setRange(0, total)
+        self.upload_progress.setValue(sent)
+
+    def on_upload_finished(self, ok: bool) -> None:
+        # The worker has already said what happened; this only hands the
+        # controls back.
+        self._set_uploading(False)
 
     def apply_effect(self) -> None:
         mode = self.effect_box.currentIndex()
@@ -565,13 +705,8 @@ class MainWindow(QMainWindow):
             mode, rgb, p9=self.brightness.value(), p10=self.speed.value()
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
-        self._send(
-            f"effect {self.effect_box.currentText()} (mode {mode:#04x})",
-            lambda: self.kb.set_effect(
-                mode, rgb,
-                brightness=self.brightness.value(),
-                speed=self.speed.value(),
-            ),
+        self.request_effect.emit(
+            mode, *rgb, self.brightness.value(), self.speed.value()
         )
 
 
