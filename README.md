@@ -49,7 +49,7 @@ app's nine screens are built.
 | Transaction envelope | ✅ done |
 | Key table, all 69 LED indices | ✅ done |
 | Per-key colour | ✅ implemented, confirmed on hardware |
-| Built-in animations | ⚠️ framing right, effect ids still unmapped |
+| Built-in animations | ⚠️ 20 mode bytes recovered from the driver; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
 | Key remapping, macros | 🔍 opcodes located, payloads not decoded |
@@ -166,8 +166,11 @@ Useful for protocol work, since it sends one packet at a time.
 # light one key
 ./mk-k68-lightsmart key Esc FF0000
 
-# select a built-in animation
-./mk-k68-lightsmart effect 0x06 00FFFF --brightness 12 --speed 8
+# list the built-in animations and the mode byte each one uses
+./mk-k68-lightsmart effects
+
+# select one, by name or by mode
+./mk-k68-lightsmart effect Breath 00FFFF --brightness 12 --speed 8
 
 # upload one frame to the strip: a pattern built to expose mistakes
 ./mk-k68-lightsmart strip test

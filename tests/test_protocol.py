@@ -226,6 +226,41 @@ class AnimationPayload(unittest.TestCase):
             a.payload()
 
 
+class EffectTable(unittest.TestCase):
+    """The modes the driver attaches to its own list items."""
+
+    def test_the_list_is_what_the_keyboard_offers(self):
+        # 20 rows, not the 22 names in the string table: the last two
+        # are never added to this keyboard's list.
+        self.assertEqual(len(protocol.EFFECTS), 20)
+        self.assertEqual(len({e.mode for e in protocol.EFFECTS}), 20)
+        self.assertEqual(len({e.name for e in protocol.EFFECTS}), 20)
+
+    def test_the_mode_is_the_row_plus_one_except_the_off_switch(self):
+        # 0x43BFA0 onwards: AddString(name, mode, -1), string 200+row.
+        for row, effect in enumerate(protocol.EFFECTS[:-1]):
+            self.assertEqual(effect.mode, row + 1, effect.name)
+        last = protocol.EFFECTS[-1]
+        self.assertEqual((last.name, last.mode), ("Close Backlight", 0x00))
+
+    def test_modes_fit_a_data_frame_byte(self):
+        for effect in protocol.EFFECTS:
+            self.assertEqual(protocol.data_frame(effect.mode)[0], effect.mode)
+
+    def test_a_name_resolves_whatever_its_case(self):
+        self.assertEqual(protocol.effect_mode("Breath"), 0x07)
+        self.assertEqual(protocol.effect_mode("  close backlight "), 0x00)
+
+    def test_a_number_still_works(self):
+        self.assertEqual(protocol.effect_mode("0x12"), 0x12)
+        self.assertEqual(protocol.effect_mode("7"), 7)
+
+    def test_nonsense_is_refused_with_the_list(self):
+        with self.assertRaises(ValueError) as caught:
+            protocol.effect_mode("Rainbow")
+        self.assertIn("Glittering", str(caught.exception))
+
+
 class Conversions(unittest.TestCase):
     def test_brightness_clamps(self):
         self.assertEqual(matrix.brightness_to_byte(0), 0)

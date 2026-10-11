@@ -845,13 +845,12 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(label("Effect"))
         self.effect_box = QComboBox()
-        self.effect_box.addItems([
-            "Static", "SingleOn", "SingleOff", "Glittering", "Falling",
-            "Colourful", "Breath", "Spectrum", "Outward", "Scrolling",
-            "Rolling", "Rotating", "Explode", "Launch", "Ripples",
-            "Flowing", "Pulsating", "Tilt", "Shuttle", "Close Backlight",
-            "Inwards", "Floweriness",
-        ])
+        # In the vendor's own order, each carrying its mode byte -- which
+        # is not the row: the driver keeps the mode as the list item's
+        # data, and Close Backlight is 0x00 while the row before it is
+        # 0x13.
+        for effect in protocol.EFFECTS:
+            self.effect_box.addItem(effect.name, effect.mode)
         self.effect_box.setFixedWidth(150)
         self.effect_box.setStyleSheet(
             "QComboBox { background:#0a2444; color:#cfe3ff; border:1px solid #0d3a6b;"
@@ -1089,7 +1088,7 @@ class MainWindow(QMainWindow):
         self._set_uploading(False)
 
     def apply_effect(self) -> None:
-        mode = self.effect_box.currentIndex()
+        mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             mode, rgb, p9=self.brightness.value(), p10=self.speed.value()

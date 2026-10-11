@@ -271,7 +271,11 @@ def cmd_effect_scan(args: argparse.Namespace) -> int:
                         time.sleep(args.dwell)
                         note = ""
                     else:
-                        note = input(f"{mode:#04x}  what did it do? ").strip()
+                        known = protocol.EFFECT_BY_MODE.get(mode)
+                        label = f" [{known.name}]" if known else ""
+                        note = input(
+                            f"{mode:#04x}{label}  what did it do? "
+                        ).strip()
                         if note.lower() in ("q", "quit"):
                             break
                 seen.append((mode, note or "-"))
@@ -288,10 +292,20 @@ def cmd_effect_scan(args: argparse.Namespace) -> int:
 
 def cmd_effect(args: argparse.Namespace) -> int:
     rgb = _parse_colour(args.colour)
+    mode = protocol.effect_mode(args.mode)
     with protocol.Keyboard() as kb:
-        kb.set_effect(args.mode, rgb, brightness=args.brightness,
+        kb.set_effect(mode, rgb, brightness=args.brightness,
                       speed=args.speed, direction=args.direction)
-    print(f"effect mode {args.mode:#04x} -> #{args.colour}")
+    named = protocol.EFFECT_BY_MODE.get(mode)
+    label = f" ({named.name})" if named else ""
+    print(f"effect mode {mode:#04x}{label} -> #{args.colour.lstrip('#')}")
+    return 0
+
+
+def cmd_effects(args: argparse.Namespace) -> int:
+    """List the effects the vendor UI offers, with their mode bytes."""
+    for effect in protocol.EFFECTS:
+        print(f"{effect.mode:#04x}  {effect.name}")
     return 0
 
 
@@ -315,8 +329,12 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("colour", help="RRGGBB")
     k.set_defaults(func=cmd_key_colour)
 
+    sub.add_parser(
+        "effects", help="list the built-in animations and their modes"
+    ).set_defaults(func=cmd_effects)
+
     e = sub.add_parser("effect", help="select a built-in animation")
-    e.add_argument("mode", type=lambda s: int(s, 0), help="effect mode byte")
+    e.add_argument("mode", help="effect name (see 'effects') or a mode byte")
     e.add_argument("colour", help="RRGGBB")
     e.add_argument("--brightness", type=int, default=0)
     e.add_argument("--speed", type=int, default=0)
@@ -338,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     es = sub.add_parser("effect-scan",
                         help="walk the effect modes, recording what each does")
     es.add_argument("--first", type=lambda s: int(s, 0), default=0x00)
-    es.add_argument("--last", type=lambda s: int(s, 0), default=0x15)
+    es.add_argument("--last", type=lambda s: int(s, 0), default=0x14)
     es.add_argument("--colour", default="FF0000")
     es.add_argument("--brightness", type=int, default=10)
     es.add_argument("--speed", type=int, default=8)

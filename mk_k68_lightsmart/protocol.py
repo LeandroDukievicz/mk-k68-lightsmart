@@ -116,12 +116,66 @@ class Effect:
 
     ``mode`` is byte 0 of the data frame.  The names come from the
     driver's own English resource file (``language/1033.lan``, ids
-    200-221); the numeric modes are **not** stated there and are the part
-    still to be confirmed against hardware.
+    200-221); the modes come from the driver filling its effect list,
+    which carries each entry's mode as the list item's data and reads it
+    back with ``GetItemData`` when the selection changes.
     """
 
     mode: int
     name: str
+
+
+#: The effect list, in the order the vendor UI shows it.
+#:
+#: Recovered from the list population at 0x43BFA0-0x43C5FF: each entry is
+#: ``AddString(name, mode, -1)`` with the name loaded from string id
+#: 200+row, and the handler at 0x430020 reads the selected item's data
+#: back (``GetCurSel`` then ``GetItemData``) into the field it later
+#: writes as byte 0.
+#:
+#: So the mode is the row *plus one*, except Close Backlight, which is
+#: zero -- an off switch rather than an animation. Strings 220 and 221
+#: ("Inwards", "Floweriness") name effects this keyboard's list never
+#: offers, so they have no mode here.
+EFFECTS = (
+    Effect(0x01, "Static"),
+    Effect(0x02, "SingleOn"),
+    Effect(0x03, "SingleOff"),
+    Effect(0x04, "Glittering"),
+    Effect(0x05, "Falling"),
+    Effect(0x06, "Colourful"),
+    Effect(0x07, "Breath"),
+    Effect(0x08, "Spectrum"),
+    Effect(0x09, "Outward"),
+    Effect(0x0A, "Scrolling"),
+    Effect(0x0B, "Rolling"),
+    Effect(0x0C, "Rotating"),
+    Effect(0x0D, "Explode"),
+    Effect(0x0E, "Launch"),
+    Effect(0x0F, "Ripples"),
+    Effect(0x10, "Flowing"),
+    Effect(0x11, "Pulsating"),
+    Effect(0x12, "Tilt"),
+    Effect(0x13, "Shuttle"),
+    Effect(0x00, "Close Backlight"),
+)
+
+EFFECT_BY_MODE = {e.mode: e for e in EFFECTS}
+EFFECT_BY_NAME = {e.name.lower(): e for e in EFFECTS}
+
+
+def effect_mode(text: str) -> int:
+    """Resolve an effect name, or a number, to a mode byte."""
+    found = EFFECT_BY_NAME.get(text.strip().lower())
+    if found is not None:
+        return found.mode
+    try:
+        return int(text, 0)
+    except ValueError:
+        raise ValueError(
+            f"no effect called {text!r}; try one of: "
+            + ", ".join(e.name for e in EFFECTS)
+        ) from None
 
 
 class Keyboard:

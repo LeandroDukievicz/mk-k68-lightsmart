@@ -167,7 +167,36 @@ The driver never sends a data frame bare:
 
 ### Built-in animation — `fcn.00430580`
 
-**verified** framing, **inferred** parameter meanings.
+**verified** framing and mode bytes, **inferred** parameter meanings.
+
+The mode bytes are not in the string table, and they are not the row
+numbers either. The driver fills its effect list with
+`AddString(name, mode, -1)` (`0x43BFA0`-`0x43C5FF`), taking the name
+from string id 200+row and attaching the mode as the item's data; the
+selection handler at `0x430020` reads it back with `GetCurSel` then
+`GetItemData@HFDListBox` and stores it in the field that later becomes
+byte 0 (`0x430628`).
+
+| mode | name | | mode | name |
+|---|---|---|---|---|
+| `0x00` | Close Backlight | | `0x0A` | Scrolling |
+| `0x01` | Static | | `0x0B` | Rolling |
+| `0x02` | SingleOn | | `0x0C` | Rotating |
+| `0x03` | SingleOff | | `0x0D` | Explode |
+| `0x04` | Glittering | | `0x0E` | Launch |
+| `0x05` | Falling | | `0x0F` | Ripples |
+| `0x06` | Colourful | | `0x10` | Flowing |
+| `0x07` | Breath | | `0x11` | Pulsating |
+| `0x08` | Spectrum | | `0x12` | Tilt |
+| `0x09` | Outward | | `0x13` | Shuttle |
+
+So the mode is the row plus one, with Close Backlight — an off switch
+rather than an animation — taking `0x00`. Strings 220 and 221
+("Inwards", "Floweriness") name effects this keyboard's list never
+offers; a second, shorter list at `0x43D800` holds ten of the same
+entries, which is what the handler's `cmp ebx, 0x6` / `0x8` branches
+are choosing between. `0x14` appears in the handler's comparisons
+without a list entry, so something uses it; what, is not known.
 
 Byte 0 is the effect mode, taken from the app's current-mode field
 (`[esi+0x814]`). Bytes 1-3 and 8-11 are copied out of a 20-byte
@@ -371,8 +400,8 @@ not decoded yet.
 
 ## 8. What is still open
 
-1. Numeric ids for the 22 lighting effects — the string table names
-   them but never numbers them.
+1. ~~Numeric ids for the lighting effects~~ — recovered from the
+   driver's own list population; see §5. What `0x14` is remains open.
 2. Which of bytes 8-11 is brightness, speed, direction and
    random-colour, and their ranges.
 3. Key remap payload layout (`0x11`, `0x27`; 694 and 684 bytes).
