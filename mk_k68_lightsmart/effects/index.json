@@ -127,6 +127,20 @@
    "bytes": 1886
   },
   {
+   "key": "locomotive",
+   "title": "Locomotive",
+   "file": "locomotive.strip.gz",
+   "frames": 104,
+   "source_frames": 312,
+   "source_size": [
+    700,
+    70
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 54462
+  },
+  {
    "key": "nyancat",
    "title": "Nyan cat",
    "file": "nyancat.strip.gz",
@@ -223,6 +237,20 @@
    "stride": 1,
    "delay_ms": 100,
    "bytes": 1625
+  },
+  {
+   "key": "sunset",
+   "title": "Sunset",
+   "file": "sunset.strip.gz",
+   "frames": 104,
+   "source_frames": 312,
+   "source_size": [
+    700,
+    70
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 52464
   },
   {
    "key": "tetris-mount",

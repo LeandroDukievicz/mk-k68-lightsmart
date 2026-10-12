@@ -51,6 +51,8 @@ TITLES = {
     "space": "Space",
     "tetris-mount": "Tetris wall",
     "vertical-matrix": "Vertical code",
+    "locomotive": "Locomotive",
+    "sunset": "Sunset",
     ">>>": "Arrows",
 }
 
