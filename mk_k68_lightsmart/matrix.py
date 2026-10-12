@@ -111,6 +111,24 @@ class Frame:
             raise ValueError(f"expected {ROWS} rows of {COLS}")
         return cls([rgb for row in rows for rgb in row])
 
+    @classmethod
+    def decode(cls, data: bytes) -> "Frame":
+        """Rebuild a frame from :meth:`encode`'s wire bytes.
+
+        What the keyboard is sent is also how the bundled effects are
+        stored, so this is the only reader they need.
+        """
+        if len(data) != FRAME_BYTES:
+            raise ValueError(
+                f"a frame is {FRAME_BYTES} bytes on the wire, got {len(data)}"
+            )
+        frame = cls()
+        pixels = frame.pixels
+        for i in range(LEDS):
+            r, g, b = data[i * 3], data[i * 3 + 1], data[i * 3 + 2]
+            pixels[i] = (r << 16) | (g << 8) | b
+        return frame
+
     def encode(self, brightness: int = 255) -> bytes:
         """Pack to the wire form: three bytes per LED, R then G then B.
 

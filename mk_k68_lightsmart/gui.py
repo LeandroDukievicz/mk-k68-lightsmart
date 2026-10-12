@@ -464,7 +464,7 @@ class MatrixPage(QWidget):
         built_in = QHBoxLayout()
         built_in.addWidget(caption("Built in"))
         self.built_in = QComboBox()
-        for name, label in patterns.BUILT_INS.items():
+        for name, label in patterns.catalogue().items():
             self.built_in.addItem(label, name)
         self.built_in.setStyleSheet(
             "QComboBox { background:#0a2444; color:#cfe3ff; border:1px solid #0d3a6b;"

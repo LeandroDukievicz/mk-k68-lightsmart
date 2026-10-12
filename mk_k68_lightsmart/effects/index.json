@@ -1,0 +1,256 @@
+{
+ "effects": [
+  {
+   "key": "aquarium",
+   "title": "Aquarium",
+   "file": "aquarium.strip.gz",
+   "frames": 104,
+   "source_frames": 312,
+   "source_size": [
+    700,
+    70
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 49335
+  },
+  {
+   "key": "arrows",
+   "title": "Arrows",
+   "file": "arrows.strip.gz",
+   "frames": 66,
+   "source_frames": 66,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 2032
+  },
+  {
+   "key": "matrix-plus",
+   "title": "Code plus",
+   "file": "matrix-plus.strip.gz",
+   "frames": 13,
+   "source_frames": 13,
+   "source_size": [
+    1563,
+    123
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 5584
+  },
+  {
+   "key": "cian-matrix",
+   "title": "Cyan code",
+   "file": "cian-matrix.strip.gz",
+   "frames": 50,
+   "source_frames": 50,
+   "source_size": [
+    475,
+    44
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 22298
+  },
+  {
+   "key": "emoji",
+   "title": "Emoji",
+   "file": "emoji.strip.gz",
+   "frames": 62,
+   "source_frames": 123,
+   "source_size": [
+    840,
+    84
+   ],
+   "stride": 2,
+   "delay_ms": 100,
+   "bytes": 9692
+  },
+  {
+   "key": "flowers",
+   "title": "Flowers",
+   "file": "flowers.strip.gz",
+   "frames": 89,
+   "source_frames": 265,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 3076
+  },
+  {
+   "key": "gameover",
+   "title": "Game over",
+   "file": "gameover.strip.gz",
+   "frames": 80,
+   "source_frames": 80,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 6319
+  },
+  {
+   "key": "gamer",
+   "title": "Gamer",
+   "file": "gamer.strip.gz",
+   "frames": 117,
+   "source_frames": 350,
+   "source_size": [
+    1000,
+    100
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 33537
+  },
+  {
+   "key": "invaders",
+   "title": "Invaders",
+   "file": "invaders.strip.gz",
+   "frames": 89,
+   "source_frames": 89,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 1886
+  },
+  {
+   "key": "nyancat",
+   "title": "Nyan cat",
+   "file": "nyancat.strip.gz",
+   "frames": 16,
+   "source_frames": 16,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 1019
+  },
+  {
+   "key": "pacman",
+   "title": "Pac-chase",
+   "file": "pacman.strip.gz",
+   "frames": 2,
+   "source_frames": 2,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 547
+  },
+  {
+   "key": "purple",
+   "title": "Purple drift",
+   "file": "purple.strip.gz",
+   "frames": 104,
+   "source_frames": 312,
+   "source_size": [
+    700,
+    70
+   ],
+   "stride": 3,
+   "delay_ms": 100,
+   "bytes": 72297
+  },
+  {
+   "key": "robot",
+   "title": "Robot",
+   "file": "robot.strip.gz",
+   "frames": 64,
+   "source_frames": 128,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 2,
+   "delay_ms": 100,
+   "bytes": 2998
+  },
+  {
+   "key": "snake-game",
+   "title": "Snake",
+   "file": "snake-game.strip.gz",
+   "frames": 99,
+   "source_frames": 393,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 4,
+   "delay_ms": 100,
+   "bytes": 3128
+  },
+  {
+   "key": "sound",
+   "title": "Sound bars",
+   "file": "sound.strip.gz",
+   "frames": 3,
+   "source_frames": 3,
+   "source_size": [
+    1563,
+    123
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 1360
+  },
+  {
+   "key": "space",
+   "title": "Space",
+   "file": "space.strip.gz",
+   "frames": 88,
+   "source_frames": 88,
+   "source_size": [
+    1300,
+    100
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 1625
+  },
+  {
+   "key": "tetris-mount",
+   "title": "Tetris wall",
+   "file": "tetris-mount.strip.gz",
+   "frames": 60,
+   "source_frames": 60,
+   "source_size": [
+    1563,
+    123
+   ],
+   "stride": 1,
+   "delay_ms": 100,
+   "bytes": 7135
+  },
+  {
+   "key": "vertical-matrix",
+   "title": "Vertical code",
+   "file": "vertical-matrix.strip.gz",
+   "frames": 67,
+   "source_frames": 133,
+   "source_size": [
+    1000,
+    100
+   ],
+   "stride": 2,
+   "delay_ms": 100,
+   "bytes": 32735
+  }
+ ]
+}

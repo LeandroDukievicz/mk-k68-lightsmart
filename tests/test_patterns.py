@@ -9,8 +9,11 @@ hard to see in a diff.
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -326,3 +329,78 @@ class TheFont(unittest.TestCase):
         frame = matrix.Frame()
         font.draw(frame, "ç", 0, 0xFFFFFF)
         self.assertTrue(any(frame.pixels))
+
+
+class TheShippedEffects(unittest.TestCase):
+    """The animations converted from the vendor's library.
+
+    They are data files, so what matters is that every one of them
+    still decodes into frames the keyboard will take -- a truncated or
+    half-written file would otherwise only show up on the strip.
+    """
+
+    def test_the_index_and_the_files_agree(self):
+        for key, entry in patterns.bundled().items():
+            path = patterns.EFFECTS_DIR / entry["file"]
+            self.assertTrue(path.exists(), key)
+            self.assertEqual(path.stat().st_size, entry["bytes"], key)
+
+    def test_every_one_decodes_to_the_frames_it_claims(self):
+        for key, entry in patterns.bundled().items():
+            frames = patterns.load_bundled(key)
+            self.assertEqual(len(frames), entry["frames"], key)
+            self.assertTrue(frames, key)
+
+    def test_every_one_is_uploadable(self):
+        for key in patterns.bundled():
+            frames = patterns.build(key)
+            self.assertLessEqual(len(frames), matrix.MAX_FRAMES_ANIMATION, key)
+            matrix.Animation(frames=frames).payload()
+
+    def test_they_are_pictures_rather_than_blank(self):
+        for key in patterns.bundled():
+            frames = patterns.load_bundled(key)
+            lit = sum(1 for frame in frames for pixel in frame.pixels if pixel)
+            self.assertGreater(lit, 0, f"{key} is entirely dark")
+
+    def test_the_catalogue_is_the_generated_ones_and_these(self):
+        catalogue = patterns.catalogue()
+        for key in patterns.GENERATED:
+            self.assertIn(key, catalogue)
+        for key in patterns.bundled():
+            self.assertIn(key, catalogue)
+
+    def test_a_missing_folder_is_not_fatal(self):
+        # A checkout that has not been converted still runs; only the
+        # generated animations are offered.
+        with unittest.mock.patch.object(patterns, "EFFECTS_DIR",
+                                        Path("/nonexistent")):
+            patterns.bundled.cache_clear()
+            try:
+                self.assertEqual(patterns.bundled(), {})
+                self.assertEqual(set(patterns.catalogue()),
+                                 set(patterns.GENERATED))
+                self.assertTrue(patterns.build("tetris"))
+            finally:
+                patterns.bundled.cache_clear()
+
+    def test_a_truncated_file_says_so(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "x.strip.gz").write_bytes(gzip.compress(b"\x00" * 100))
+            (folder / "index.json").write_text(json.dumps(
+                {"effects": [{"key": "x", "title": "X", "file": "x.strip.gz",
+                              "frames": 1, "bytes": 0}]}))
+            with unittest.mock.patch.object(patterns, "EFFECTS_DIR", folder):
+                patterns.bundled.cache_clear()
+                try:
+                    with self.assertRaises(ValueError):
+                        patterns.load_bundled("x")
+                finally:
+                    patterns.bundled.cache_clear()
+
+    def test_an_unknown_name_lists_what_there_is(self):
+        with self.assertRaises(ValueError) as caught:
+            patterns.build("does-not-exist")
+        self.assertIn("aquarium", str(caught.exception))

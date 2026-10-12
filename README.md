@@ -309,9 +309,22 @@ review) — are written up with their trade-offs.
 GPL-3.0-or-later.
 
 This is a clean interoperability reimplementation. It ships none of the
-manufacturer's code, artwork, strings or data — the UI is drawn, and the
-palette was sampled to match rather than copied. The vendor material
+manufacturer's **code**, strings or binaries — the UI is drawn, the
+palette was sampled to match rather than copied, and the vendor material
 used while reverse-engineering stays out of the repository.
+
+It does ship their **dot-matrix designs**. The eighteen animations in
+`mk_k68_lightsmart/effects/` come from the library the manufacturer
+publishes for this keyboard, converted from the GIFs they serve to the
+65×5 the strip actually is (251 KB in total, from 29 MB of source).
+They are included so the app is useful the moment it is installed, with
+no download and no import. They are the manufacturer's artwork, not
+this project's, and some of them depict characters belonging to other
+parties again; `tools/convert_effects.py` regenerates them from a local
+folder, so removing them is deleting a directory.
+
+The five animations the program *generates* — Tetris, the runner and
+the three rains — are this project's own.
 
 The project is not affiliated with, endorsed by, or derived from the
 source code of any keyboard manufacturer.

@@ -7,9 +7,16 @@ returns the same frames, which is what lets the tests check them.
 
 from __future__ import annotations
 
+import functools
+import gzip
+import json
 import random
+from pathlib import Path
 
-from .matrix import COLS, LEDS, ROWS, Frame
+from .matrix import COLS, FRAME_BYTES, LEDS, ROWS, Frame
+
+#: Where the shipped animations live, as the bytes the keyboard is sent.
+EFFECTS_DIR = Path(__file__).resolve().parent / "effects"
 
 #: The tetrominoes, in their usual colours, turned up.
 PIECE_COLOURS = {
@@ -414,8 +421,8 @@ def meter(readings, frames_each: int = 1) -> list[Frame]:
     return frames
 
 
-#: What the UI and the CLI offer, by name.
-BUILT_INS: dict[str, str] = {
+#: The animations this module generates, by name.
+GENERATED: dict[str, str] = {
     "tetris": "Tetris — pieces falling in until the strip is a wall",
     "runner": "Runner — the browser's dinosaur, jumping cacti",
     "matrix-green": "Matrix rain, green",
@@ -424,14 +431,60 @@ BUILT_INS: dict[str, str] = {
 }
 
 
+@functools.lru_cache(maxsize=1)
+def bundled() -> dict[str, dict]:
+    """The shipped effects, by key, from their index.
+
+    Empty rather than fatal when the folder is missing: the app runs
+    from a checkout that has not been converted, and the generated
+    animations do not depend on any of this.
+    """
+    index = EFFECTS_DIR / "index.json"
+    try:
+        data = json.loads(index.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {entry["key"]: entry for entry in data.get("effects", [])
+            if isinstance(entry, dict) and entry.get("key")}
+
+
+def load_bundled(key: str) -> list[Frame]:
+    """Frames of one shipped effect."""
+    entry = bundled().get(key)
+    if entry is None:
+        raise ValueError(f"no effect called {key!r}")
+    raw = gzip.decompress((EFFECTS_DIR / entry["file"]).read_bytes())
+    if len(raw) % FRAME_BYTES:
+        raise ValueError(
+            f"{entry['file']} is {len(raw)} bytes, not whole frames of "
+            f"{FRAME_BYTES}"
+        )
+    return [Frame.decode(raw[at:at + FRAME_BYTES])
+            for at in range(0, len(raw), FRAME_BYTES)]
+
+
+def catalogue() -> dict[str, str]:
+    """Everything the UI and the CLI offer: generated first, then shipped."""
+    out = dict(GENERATED)
+    for key, entry in bundled().items():
+        out[key] = f"{entry['title']} — {entry['frames']} frames"
+    return out
+
+
+#: Kept for callers that only want what is generated here.
+BUILT_INS = GENERATED
+
+
 def build(name: str) -> list[Frame]:
-    """Frames for one of :data:`BUILT_INS`."""
+    """Frames for anything in :func:`catalogue`."""
     if name == "tetris":
         return tetris_fill()
     if name == "runner":
         return dino_run()
-    if name.startswith("matrix-"):
+    if name.startswith("matrix-") and name.split("-", 1)[1] in RAIN_COLOURS:
         return matrix_rain(name.split("-", 1)[1])
+    if name in bundled():
+        return load_bundled(name)
     raise ValueError(
-        f"no built-in called {name!r}; try " + ", ".join(sorted(BUILT_INS))
+        f"no effect called {name!r}; try " + ", ".join(sorted(catalogue()))
     )

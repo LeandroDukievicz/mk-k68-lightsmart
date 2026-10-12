@@ -280,8 +280,9 @@ def cmd_pattern(args: argparse.Namespace) -> int:
     from . import patterns
 
     if args.name is None:
-        width = max(len(n) for n in patterns.BUILT_INS)
-        for name, label in patterns.BUILT_INS.items():
+        catalogue = patterns.catalogue()
+        width = max(len(n) for n in catalogue)
+        for name, label in catalogue.items():
             print(f"{name:<{width}}  {label}")
         return 0
 
