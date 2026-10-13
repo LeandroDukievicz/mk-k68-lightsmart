@@ -127,6 +127,34 @@ parts:
       sed -i "1s|.*|#!$snap_root/bin/python3|" \
         bin/mk-k68-lightsmart bin/mk-k68-lightsmart-gui
 
+      # PySide6-Essentials still carries Qt Quick, QML, Designer, the
+      # 3D and multimedia stacks and a QML-based control set -- 120 MB
+      # of it -- and this app imports QtCore, QtGui and QtWidgets. Keep
+      # those and what the platform plugins need, drop the rest.
+      qt=lib/python3.12/site-packages/PySide6
+      keep="Core Gui Widgets DBus Network OpenGL Svg XcbQpa"
+      for so in "$qt"/Qt/lib/libQt6*.so*; do
+        name=$(basename "$so"); module=${name#libQt6}; module=${module%%.so*}
+        case "$module" in Wayland*) continue;; esac
+        case " $keep " in *" $module "*) ;; *) rm -f "$so";; esac
+      done
+      # Bindings for the modules that just went, and the data only they
+      # read. Translations go too: Qt falls back to English, which is
+      # what this app is written in.
+      for binding in "$qt"/Qt*.abi3.so; do
+        name=$(basename "$binding" .abi3.so)
+        case "$name" in
+          QtCore|QtGui|QtWidgets|QtDBus|QtNetwork|QtOpenGL|QtSvg) ;;
+          *) rm -f "$binding";;
+        esac
+      done
+      rm -rf "$qt"/Qt/qml "$qt"/Qt/translations "$qt"/Qt/metatypes \
+             "$qt"/Qt/libexec "$qt"/Qt/plugins/sqldrivers \
+             "$qt"/Qt/plugins/multimedia "$qt"/Qt/plugins/qmltooling \
+             "$qt"/Qt/plugins/designer "$qt"/Qt/plugins/virtualkeyboard \
+             "$qt"/Qt/plugins/renderers "$qt"/Qt/plugins/sceneparsers \
+             "$qt"/Qt/plugins/geometryloaders
+
   # The desktop file lives in desktop/, not snap/gui/: snapcraft copies
   # everything under snap/gui/ into meta/gui, and the `desktop:` key on
   # the app installs its own copy, so a file in both places puts the app
