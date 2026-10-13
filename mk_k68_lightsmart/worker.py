@@ -106,6 +106,19 @@ class DeviceWorker(QObject):
         self.status.emit(f"{what} sent", True)
         return True
 
+    @Slot(object, bool)
+    def write_keymap(self, block: bytes, fn_layer: bool) -> None:
+        """Make ``block`` the keyboard's map.
+
+        Unlike every other request here this one outlives the process,
+        so the screen asks before it sends and the guard reports the
+        result either way rather than failing quietly.
+        """
+        self._guard(
+            "keymap",
+            lambda: self.kb.write_keymap(block, fn_layer=fn_layer),
+        )
+
     @Slot(int, int, int, int)
     def set_key_colour(self, light_index: int, r: int, g: int, b: int) -> None:
         """Queue one key's colour, keeping only the latest per key.

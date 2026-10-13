@@ -259,6 +259,13 @@ class SidebarButton(QPushButton):
         p.drawText(QRectF(0, 26, self.width(), 18), Qt.AlignCenter, self.caption)
 
 
+def caption(text: str) -> QLabel:
+    """The small muted label that names the control under it."""
+    lb = QLabel(text)
+    lb.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+    return lb
+
+
 def primary_button(text: str, on_click) -> QPushButton:
     """The accented action button, as the vendor UI draws it."""
     b = QPushButton(text)
@@ -1017,6 +1024,7 @@ class MainWindow(QMainWindow):
     request_key = Signal(int, int, int, int)
     request_effect = Signal(int, int, int, int, int, int, int)
     request_upload = Signal(object)
+    request_keymap = Signal(object, bool)
 
     NAV = [
         ("⌂", "Home"),
@@ -1061,10 +1069,30 @@ class MainWindow(QMainWindow):
         self.matrix_page.upload_requested.connect(self.start_upload)
         self.matrix_page.cancel_requested.connect(self.cancel_upload)
         self.matrix_page.status.connect(self.set_status)
-        # The rail's sections, in its order; the ones with no screen yet
-        # get the placeholder.
-        built = {0: self._build_home(), 3: self.light_page,
-                 7: self.matrix_page}
+        # Imported here rather than at the top: the screens take this
+        # module's chrome, so they can only be loaded once it exists.
+        from . import screens
+
+        self.keys_page = screens.KeysPage()
+        self.keys_page.status.connect(self.set_status)
+        self.keys_page.write_requested.connect(self.request_keymap)
+
+        self.custom_page = screens.CustomPage(lambda: self.colour)
+        self.custom_page.status.connect(self.set_status)
+        self.custom_page.apply_key.connect(self.on_custom_key)
+
+        self.macro_page = screens.MacroPage()
+        self.macro_page.status.connect(self.set_status)
+        self.profiles_page = screens.ProfilesPage()
+        self.profiles_page.status.connect(self.set_status)
+        self.music_page = screens.MusicPage()
+        self.music_page.status.connect(self.set_status)
+
+        # The rail's sections, in its order. Every one has a screen now.
+        built = {0: self._build_home(), 1: self.keys_page,
+                 2: self.macro_page, 3: self.light_page,
+                 4: self.profiles_page, 5: self.custom_page,
+                 6: self.music_page, 7: self.matrix_page}
         for index in range(len(self.NAV)):
             self.pages.addWidget(
                 built.get(index) or self._build_placeholder(index))
@@ -1392,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.request_key.connect(w.set_key_colour)
         self.request_effect.connect(w.set_effect)
         self.request_upload.connect(w.upload)
+        self.request_keymap.connect(w.write_keymap)
 
     def reconnect(self) -> None:
         self.set_status("looking for the keyboard…")
@@ -1445,6 +1474,15 @@ class MainWindow(QMainWindow):
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_key.emit(key.light_index, *rgb)
+
+    def on_custom_key(self, light_index: int, colour: QColor) -> None:
+        """Send one key of a painted layout.
+
+        The worker coalesces these by key, so sending a whole board at
+        once costs one request per key rather than one per repaint.
+        """
+        self.request_key.emit(
+            light_index, colour.red(), colour.green(), colour.blue())
 
     def on_key_applied(self, light_index: int, rgb: int) -> None:
         """Paint a key only once the keyboard has taken its colour."""

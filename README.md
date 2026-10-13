@@ -39,8 +39,10 @@ first two; all configuration goes through the third:
 ## Status
 
 The transport is complete, and both lighting paths are confirmed on
-real hardware: per-key colour, and the dot-matrix upload. Two of the
-app's nine screens are built.
+real hardware: per-key colour, and the dot-matrix upload. Every section
+of the rail now opens on a screen rather than a placeholder, but they
+do not all reach the keyboard — three of them edit state the protocol
+cannot yet carry, and each says so on its face.
 
 | Area | State |
 |---|---|
@@ -52,9 +54,11 @@ app's nine screens are built.
 | Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
-| Key remapping | ✅ writes from the CLI, with the vendor's own default map as the way back; not yet confirmed on hardware, and no screen for it |
-| Macros | 🔍 opcodes located, event encoding not decoded |
-| Music-reactive, settings screens | ⬜ not started |
+| Key remapping | ✅ screen and CLI both write, with the vendor's own default map as the way back; not yet confirmed on hardware |
+| Custom lighting | ✅ paint a whole board and send it, key by key; storing it as a profile needs the profile commands |
+| Macros | 🔍 screen edits and keeps them; the event encoding is still undecoded, so nothing is sent |
+| User profiles | 🔍 screen edits the scheme list; the driver has no switch command, so a scheme is a host-side bundle |
+| Music-reactive | 🔍 screen and controls built; needs an audio capture, not a new command |
 
 ---
 

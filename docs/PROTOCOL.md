@@ -535,6 +535,59 @@ sends it.
 This removes the blocker on a key-remap screen. The way back from a
 keymap written wrong is not an undiscovered command; it is this.
 
+### The queue, and what a reset really touches
+
+The dialog does not send commands from its handlers. It appends an
+operation code to a list and lets its idle tick drain it. The handler
+writes `[this+0x7F0]` with the count at `[this+0x7F4]`; the tick reads
+`[this+0x544]` and `[this+0x548]`, which are the same two fields —
+`0x7F0 - 0x2AC = 0x544`, and the tick holds the object 0x2AC lower.
+
+| op | handler | what it sends |
+|---|---|---|
+| 1 | `fcn.00415590` | nothing |
+| 2 | `fcn.0043A9D0` | nothing |
+| 3 | `fcn.004158E0` | nothing — a list-box selection and a UI refresh |
+| 4 | `fcn.00416F20` + `fcn.00417710` | keymap `0x11`, Fn layer `0x27` |
+| 5 | `fcn.00430580` | `0x13` |
+| 6 | `fcn.00430710` | `0x23` |
+| 7 | `fcn.00439F00` | `0x17` |
+| 8 | `fcn.00429C20` | boot animation `0x31` |
+
+"Reset Keyboard Data" queues 4 alone. **"Restore Factory Settings"
+queues 3, 4 and 6**, in that order (`0x437EAA`, `0x437EE9`, `0x437F31`)
+— so the wider reset is the keymap and the Fn layer plus whatever
+`0x23` restores, and nothing else.
+
+That cases 1-3 send nothing is read off a complete census, not an
+absence of evidence: every control write in the binary is one of 56
+`mov word [...], (sub<<8)|4` stores, and none falls inside those three
+functions. Fifty-five use `[ebp+disp8]`; the fifty-sixth is below.
+
+### `0xF5` reads a block back
+
+`0x430BB0` is the one control write in the `[ebp+disp32]` form, which
+is why a `/x 66c745..04..` sweep misses it:
+
+```
+0x430BA8  memset(buf, 0, 599)
+0x430BB0  mov word  [buf], 0xF504      ; the bytes 04 F5
+0x430BBF  mov byte  [buf+8], 9         ; the same selector the keymap write uses
+0x430BCE  call fcn.00456400            ; returns a bool, which is tested
+```
+
+`fcn.00456400` is not one of the three senders. It sends and then
+reads: `fcn.00457400` calls `DeviceIoControl` with
+**`0xB0192` = IOCTL_HID_GET_FEATURE** (`0x457437`), under a timeout.
+So `04 F5` asks the keyboard for a block, and byte 8 picks which — 9,
+the same number the `0x11` write uses for the keymap.
+
+It is driven from the idle tick (`0x43A95A`), outside the case switch,
+so it is a poll rather than a user action. The response layout is not
+decoded; what is established is the direction. This is the piece that
+would make a remap screen verifiable — read the map back instead of
+trusting that the write landed.
+
 ### What actually goes out
 
 The announce carries no block count — unlike the animation, the
