@@ -24,8 +24,13 @@ mk-k68-lightsmart = "mk_k68_lightsmart.cli:main"
 [project.gui-scripts]
 mk-k68-lightsmart-gui = "mk_k68_lightsmart.gui:main"
 
-[tool.setuptools]
-packages = ["mk_k68_lightsmart"]
+# Found rather than listed. A listed package is one more place to
+# remember: `screens` was added as a subpackage and not added here, so
+# the wheel -- and the snap built from it -- shipped a `gui` that
+# imports a `screens` that is not there, which is a crash on startup
+# and not a missing feature. Discovery cannot forget.
+[tool.setuptools.packages.find]
+include = ["mk_k68_lightsmart*"]
 
 # The shipped animations, as the bytes the keyboard is sent. Without
 # this they are left out of the wheel, and so out of the snap: the app
