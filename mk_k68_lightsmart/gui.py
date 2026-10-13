@@ -1178,6 +1178,7 @@ class MainWindow(QMainWindow):
         self.custom_page.status.connect(self.set_status)
         self.custom_page.apply_key.connect(self.on_custom_key)
         self.custom_page.scheme_changed.connect(self.on_scheme_changed)
+        self.custom_page.apply_effect.connect(self.apply_custom_effect)
 
         self.macro_page = screens.MacroPage()
         self.macro_page.status.connect(self.set_status)
@@ -1793,6 +1794,24 @@ class MainWindow(QMainWindow):
             mode, *rgb, int(self.random_effect.isChecked()),
             self.brightness.value(), self.speed.value(), 0
         )
+
+    def apply_custom_effect(self, mode: int, r: int, g: int, b: int,
+                            brightness: int, speed: int) -> None:
+        """The custom screen handing a whole-board effect to the firmware.
+
+        Same command the Light screen sends, without the direction and
+        random-colour knobs: that screen offers them and this one does
+        not, so they go out as the neutral values rather than as
+        whatever the other screen was last set to.
+        """
+        name = protocol.EFFECT_BY_MODE.get(mode)
+        self.last_packet.setText(" ".join(
+            f"{byte:02X}" for byte in protocol.data_frame(
+                mode, (r, g, b), p9=brightness, p10=speed)[:16]
+        ))
+        self.set_status(
+            f"applying {name.name if name else f'{mode:#04x}'} to the board…")
+        self.request_effect.emit(mode, r, g, b, 0, brightness, speed, 0)
 
     def apply_light(self, mode: int, rgb: int, random_colour: int,
                     brightness: int, speed: int, direction: int) -> None:

@@ -560,5 +560,95 @@ class WhatApplyPutsOnThePickedKeys(Fixture):
         self.assertEqual(got[self.key("S").light_index].name(), "#00ff00")
 
 
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class WhichPathAnEffectTakes(Fixture):
+    """Whole board to the firmware, a subset to the host.
+
+    The per-key path carries about seven keys a second. Over four keys
+    that is a coarse animation; over all sixty-nine it is one refresh
+    per key every ten seconds, which on the keyboard is a still picture
+    -- the screen read as broken because what it did could not be seen.
+    The firmware has the same effects and runs them itself, so a
+    whole-board apply goes there instead.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.keys: list[int] = []
+        self.effects: list[tuple] = []
+        self.page.apply_key.connect(lambda i, c: self.keys.append(i))
+        self.page.apply_effect.connect(
+            lambda *args: self.effects.append(args))
+
+    def animated(self, name="Spectrum"):
+        self.page._select_effect(
+            next(e for e in custom.CUSTOM_EFFECTS if e.name == name))
+
+    def whole_board(self):
+        self.page.chosen = {k.light_index for k in kb_layout.KEYS}
+
+    # -- the firmware path ------------------------------------------------
+    def test_the_whole_board_goes_to_the_firmware(self):
+        self.animated()
+        self.whole_board()
+        self.page._apply()
+        self.assertEqual(len(self.effects), 1)
+        self.assertEqual(self.keys, [])
+
+    def test_it_sends_the_mode_colour_and_speed_that_were_chosen(self):
+        self.animated()
+        self.page._use(QColor("#32cd82"))
+        self.page.speed.setValue(21)
+        self.whole_board()
+        self.page._apply()
+        mode, r, g, b, brightness, speed = self.effects[0]
+        self.assertEqual(
+            mode, next(e.mode for e in custom.CUSTOM_EFFECTS
+                       if e.name == "Spectrum"))
+        self.assertEqual((r, g, b), (0x32, 0xCD, 0x82))
+        self.assertEqual(speed, 21)
+        self.assertEqual(brightness, self.page.BUILTIN_BRIGHTNESS)
+
+    def test_no_host_animation_is_left_running(self):
+        # Two things driving the same keys would fight each other.
+        self.animated()
+        self.whole_board()
+        self.page._apply()
+        self.assertIsNone(self.page._running)
+        self.assertFalse(self.page._frames.isActive())
+
+    def test_it_says_the_keyboard_is_playing_it(self):
+        self.animated()
+        self.whole_board()
+        self.page._apply()
+        self.assertIn("keyboard itself", self.said[-1])
+
+    # -- the host path still exists ---------------------------------------
+    def test_a_subset_still_runs_from_the_host(self):
+        self.animated()
+        self.page.chosen = {self.key(i).light_index for i in ("W", "A", "S")}
+        self.page._apply()
+        self.assertEqual(self.effects, [])
+        self.assertIsNotNone(self.page._running)
+
+    def test_one_key_short_of_the_board_is_still_a_subset(self):
+        self.animated()
+        self.whole_board()
+        self.page.chosen.discard(self.key("Esc").light_index)
+        self.page._apply()
+        self.assertEqual(self.effects, [])
+        self.assertIsNotNone(self.page._running)
+
+    def test_a_steady_effect_never_takes_the_firmware_path(self):
+        # Static is one write per key and then nothing; handing it to
+        # the firmware would throw away the per-key colours.
+        self.page._select_effect(
+            next(e for e in custom.CUSTOM_EFFECTS if e.name == "Static"))
+        self.whole_board()
+        self.page._apply()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(len(self.keys), len(kb_layout.KEYS))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -488,6 +488,11 @@ class CustomPage(QWidget):
     #: Bumped if an exported file stops being readable by this code.
     FILE_VERSION = 1
 
+    #: Brightness handed to the built-in effect command. Full, because
+    #: this screen has no brightness control of its own -- the vendor
+    #: puts that one on its effect-mode screen, not on this one.
+    BUILTIN_BRIGHTNESS = 100
+
     #: How often a frame is drawn. The preview can run at this rate;
     #: the keyboard cannot, which is what the sender below is for.
     FRAME_MS = 40
@@ -515,6 +520,11 @@ class CustomPage(QWidget):
 
     apply_key = Signal(int, object)          # light_index, QColor
     status = Signal(str)
+    #: mode, r, g, b, brightness, speed -- the built-in effect command,
+    #: which the firmware runs itself. Used when the whole board is
+    #: picked, because then there is nothing a per-key animation can do
+    #: that this does not do better. See :meth:`_apply`.
+    apply_effect = Signal(int, int, int, int, int, int)
     #: The scheme that has just become the active one, emitted when the
     #: list on this screen switches it. Every screen draws some part of
     #: a scheme and they share one store, so a switch changes what they
@@ -1420,8 +1430,44 @@ class CustomPage(QWidget):
         self._refresh()
         if effect.mode in STEADY:
             self._send_steady(effect, targets)
+        elif self._covers_the_board(targets):
+            self._send_builtin(effect, targets)
         else:
             self._start(effect, targets)
+
+    @staticmethod
+    def _covers_the_board(targets: dict[int, QColor]) -> bool:
+        """Is every key on the board in this apply?"""
+        return len(targets) >= len(kb_layout.KEYS)
+
+    def _send_builtin(self, effect, targets: dict[int, QColor]) -> None:
+        """Hand a whole-board effect to the firmware to run.
+
+        The per-key path is seven keys a second. Spread over four keys
+        that is a coarse animation; spread over all sixty-nine it is one
+        refresh per key every ten seconds, which on the keyboard is not
+        a slow effect but a still picture -- the screen looked broken
+        because what it was doing could not be seen.
+
+        The firmware has these same effects built in and runs them at
+        its own speed. It lights the whole board and takes one colour,
+        which is exactly the case this branch covers.
+        """
+        self._stop()
+        colour = QColor(self._colour())
+        # The vendor's wire value counts the other way: its slider is
+        # the same scale this screen shows, and a bigger number there
+        # means a faster turn.
+        self.apply_effect.emit(
+            effect.mode, colour.red(), colour.green(), colour.blue(),
+            self.BUILTIN_BRIGHTNESS, self.speed.value())
+        self._wire = {index: colour for index in targets}
+        self.board.colours = self._wire
+        self.board.update()
+        self.status.emit(
+            f"{effect.name} is running on the keyboard itself, over the "
+            f"whole board — the firmware plays it, so it keeps going "
+            f"after this app closes")
 
     def _send_steady(self, effect, targets: dict[int, QColor]) -> None:
         """Put a frame that never changes on the keyboard, once."""
