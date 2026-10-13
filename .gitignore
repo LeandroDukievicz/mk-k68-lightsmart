@@ -4,4 +4,12 @@ __pycache__/
 /prime/
 /stage/
 *.snap
+/build/
+/*.egg-info/
+dist/
+.venv/
 /reference/
+
+# Claude Code session state, including the git worktrees it creates.
+.claude/
+package-lock.json

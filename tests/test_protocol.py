@@ -68,6 +68,12 @@ class DataFrames(unittest.TestCase):
         got = protocol.data_frame(0x00)
         self.assertEqual((got[14], got[15]), protocol.FRAME_MAGIC)
 
+    def test_effect_settings_use_all_four_vendor_parameter_bytes(self):
+        got = protocol.data_frame(
+            0x07, (0x12, 0x34, 0x56), p8=1, p9=10, p10=4, p11=2)
+        self.assertEqual(got[1:4], bytes((0x12, 0x34, 0x56)))
+        self.assertEqual(got[8:12], bytes((1, 10, 4, 2)))
+
 
 class StripGeometry(unittest.TestCase):
     def test_dimensions(self):
