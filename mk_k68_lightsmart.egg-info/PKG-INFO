@@ -49,9 +49,17 @@ first two; all configuration goes through the third:
 
 ## Status
 
-The transport is complete, and the per-key colour path is confirmed on
-real hardware. The bulk upload is implemented and tested against the
-encoder, but has never run on a device. The UI is one screen in.
+The transport is complete, and both lighting paths are confirmed on
+real hardware: per-key colour, and the dot-matrix upload. Every section
+of the rail now opens on a screen rather than a placeholder, but they
+do not all reach the keyboard — three of them edit state the protocol
+cannot yet carry, and each says so on its face.
+
+Each screen is modelled on the vendor's own, section by section, from
+the handbook that ships with the Windows driver: the same regions, the
+same controls, in the same order. Where this app's protocol knowledge
+falls short of the vendor's, the control is still there and the screen
+says what it cannot do rather than leaving the section out.
 
 | Area | State |
 |---|---|
@@ -60,11 +68,14 @@ encoder, but has never run on a device. The UI is one screen in.
 | Transaction envelope | ✅ done |
 | Key table, all 69 LED indices | ✅ done |
 | Per-key colour | ✅ implemented, confirmed on hardware |
-| Built-in animations | ⚠️ framing right, some effect ids still wrong |
-| Dot-matrix frame upload | ⚠️ decoded and encoded; never yet run on a device |
-| Dot-matrix editor UI | 🚧 draws and paints, upload not wired |
-| Key remapping, macros | 🔍 opcodes located, payloads not decoded |
-| Music-reactive, settings screens | ⬜ not started |
+| Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
+| Dot-matrix frame upload | ✅ confirmed on hardware |
+| Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
+| Key remapping | ✅ the vendor's three regions: hover panel, right-click custom-function dialog over its five key types, and the quick-select grid. Writes, with the vendor's own default map as the way back; not yet confirmed on hardware |
+| User lighting | ✅ the vendor's User Light screen: scheme list, select-all / numbers / WASD, colour wheel with its fourteen presets, apply and reset. Confirmed on hardware |
+| Custom lighting | ✅ the vendor's Custom Light screen: an effect per picked key, with colour and animation speed. No command puts an effect on part of the board, so it is played from the host and the screen says so |
+| Music-reactive | ✅ the vendor's four knobs — visualisation mode, amplitude, background mode, background brightness. Records what is playing (`pw-record`, falling back to `parec`); degrades to a stand-in meter where neither exists |
+| Macros | 🔍 the vendor's four regions, including mouse buttons and the wheel, insert-before/after, copy-paste between schemes and the three delay policies. The send is disabled: an event on the wire is a `0x50` marker and two undecoded bytes |
 
 ---
 
@@ -133,7 +144,34 @@ controls row.
 - The bottom-right corner shows the exact 16 bytes that were built, so
   you can watch the protocol as you click.
 - The status bar reports the device node, or why it could not be found.
-- Click or drag across the strip to paint it.
+- Click or drag across the strip to paint it, set a brightness, and
+  press Upload. A progress bar follows the blocks.
+- Cancel stops the picture, but not the transfer: the firmware counts
+  the blocks it was promised and ignores the host until it has them
+  all, so the rest go out blank. The status bar says how many are left
+  and how long that is.
+- Every transfer runs on a thread of its own, so the window stays live
+  through an upload that can take minutes.
+
+### The Matrix screen
+
+![The strip editor](docs/images/03-matrix.png)
+
+The strip's own screen. Frames are listed down the left; the selected
+one is the picture you paint on, and the whole list goes to the keyboard
+as one animation — up to the firmware's 941.
+
+- **Add**, **Duplicate**, **Delete**, **Clear this frame**.
+- **Play** previews the animation in the window, at the frame rate the
+  speed slider will give the keyboard — the firmware's mapping is
+  calibrated, so the label says what the strip will do. Only the top of
+  the slider parts company with it, where the preview floors at 16 ms.
+- **Upload animation** streams the whole thing, with the same progress
+  bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
+  seconds.
+- **Import from a vendor database…** reads a `ledlayer_v1.data` you
+  still have from the Windows installer and loads one of its layers.
+  Nothing of the sort ships here.
 
 ---
 
@@ -151,8 +189,24 @@ Useful for protocol work, since it sends one packet at a time.
 # light one key
 ./mk-k68-lightsmart key Esc FF0000
 
-# select a built-in animation
-./mk-k68-lightsmart effect 0x06 00FFFF --brightness 12 --speed 8
+# list the built-in animations and the mode byte each one uses
+./mk-k68-lightsmart effects
+
+# select one, by name or by mode
+./mk-k68-lightsmart effect Breath 00FFFF --brightness 12 --speed 8
+
+# upload one frame to the strip: a pattern built to expose mistakes
+./mk-k68-lightsmart strip test
+./mk-k68-lightsmart strip fill 00FF00 --brightness 40
+./mk-k68-lightsmart strip clear
+
+# remap a key, and put the vendor's own default map back. This one
+# persists across a power cycle, so it asks before it writes.
+./mk-k68-lightsmart remap --set Caps=0xe0 --dry-run
+./mk-k68-lightsmart remap --defaults
+
+# walk the effect modes, recording what each one does
+./mk-k68-lightsmart effect-scan
 
 # send anything, and optionally read the reply
 ./mk-k68-lightsmart raw "04 18" --read
@@ -216,11 +270,17 @@ firmware's own limit, stated in the vendor manual too.
 04 F0                                      end
 ```
 
-`0x31` is the boot animation (134 frames max, 4-byte header of frame
-count then speed); `0x33` is an ordinary animation (941 max, 2-byte
-header). Pixels are **three bytes each in B, G, R order**, pre-scaled by
-brightness, 325 per frame = 975 bytes. LEDs are addressed row-first:
-`index = row * 65 + col`.
+`0x31` is the boot animation (134 frames max), `0x33` an ordinary one
+(941 max). Both take the same 4-byte header: frame count then speed,
+each little-endian 16-bit. Pixels are **three bytes each in R, G, B
+order**, pre-scaled by brightness, 325 per frame = 975 bytes. LEDs are
+addressed row-first: `index = row * 65 + col`.
+
+Reading the animation header as 2 bytes shifts every pixel two bytes
+early — the firmware takes the first pixel's two leading channels for
+the speed, and the strip shows what looks like a green/blue swap. That
+is how this was found; `docs/PROTOCOL.md` has the patterns that
+separate the two explanations.
 
 ---
 
@@ -276,9 +336,22 @@ review) — are written up with their trade-offs.
 GPL-3.0-or-later.
 
 This is a clean interoperability reimplementation. It ships none of the
-manufacturer's code, artwork, strings or data — the UI is drawn, and the
-palette was sampled to match rather than copied. The vendor material
+manufacturer's **code**, strings or binaries — the UI is drawn, the
+palette was sampled to match rather than copied, and the vendor material
 used while reverse-engineering stays out of the repository.
+
+It does ship their **dot-matrix designs**. The eighteen animations in
+`mk_k68_lightsmart/effects/` come from the library the manufacturer
+publishes for this keyboard, converted from the GIFs they serve to the
+65×5 the strip actually is (251 KB in total, from 29 MB of source).
+They are included so the app is useful the moment it is installed, with
+no download and no import. They are the manufacturer's artwork, not
+this project's, and some of them depict characters belonging to other
+parties again; `tools/convert_effects.py` regenerates them from a local
+folder, so removing them is deleting a directory.
+
+The five animations the program *generates* — Tetris, the runner and
+the three rains — are this project's own.
 
 The project is not affiliated with, endorsed by, or derived from the
 source code of any keyboard manufacturer.

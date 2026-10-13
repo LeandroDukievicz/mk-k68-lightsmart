@@ -134,6 +134,62 @@ def _parse_report_descriptor(blob: bytes) -> tuple[int, int] | None:
     return None
 
 
+#: The udev rule, without which the control interface is root-only.
+#: The `60-` prefix is load-bearing: the rule tags the device `uaccess`
+#: and the builtin that acts on the tag runs from `70-uaccess.rules`.
+RULE_NAME = "60-mk-k68-lightsmart.rules"
+RULE_DIR = "/etc/udev/rules.d"
+
+
+def rule_source() -> str:
+    """This installation's copy of the rule.
+
+    A snap is read-only and mounted somewhere else entirely, so the
+    path has to be the one this process can actually see.
+    """
+    snap = os.environ.get("SNAP")
+    root = snap if snap else os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))
+    return os.path.join(root, "udev", RULE_NAME)
+
+
+def rule_installed() -> bool:
+    return os.path.exists(os.path.join(RULE_DIR, RULE_NAME))
+
+
+def install_rule_commands() -> list[list[str]]:
+    """The three commands that put the rule in place."""
+    return [
+        ["install", "-m", "644", rule_source(), RULE_DIR + "/"],
+        ["udevadm", "control", "--reload-rules"],
+        ["udevadm", "trigger", "--action=add", "--subsystem-match=hidraw"],
+    ]
+
+
+def keyboard_present() -> bool:
+    """Whether any interface of this keyboard is on the bus at all.
+
+    Distinguishes "not plugged in, or the switch is not on wired" from
+    "plugged in, but the control interface is not reachable" -- which
+    are different problems with different fixes, and the only two the
+    setup screen can tell apart without opening anything.
+    """
+    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        uevent = _read_sysfs(os.path.join(node, "device", "uevent"))
+        for line in uevent.splitlines():
+            if not line.startswith("HID_ID="):
+                continue
+            parts = line.split("=", 1)[1].split(":")
+            if len(parts) != 3:
+                continue
+            try:
+                if (int(parts[1], 16), int(parts[2], 16)) == (VENDOR_ID, PRODUCT_ID):
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
 def find_control_device() -> str:
     """Locate the /dev/hidraw node for the vendor control interface.
 

@@ -39,11 +39,18 @@ from .transport import (
     ACK_OFFSET,
     ACK_OK,
     ACK_RETRY,
+    ACK_STUCK,
+    FLUSH_PACING,
     REPORT_SIZE,
     DeviceGone,
     KT68Transport,
     TransportError,
 )
+
+#: One blank 64-byte report, which is what an interrupted upload is fed
+#: to make up its outstanding count. Blank because the firmware is
+#: taking these as pixels and the picture is already lost.
+BLANK_BLOCK = bytes(REPORT_SIZE)
 
 # -- control commands (byte 0 == 0x04, byte 1 == the sub-command) --------
 CMD_PREFIX = 0x04
@@ -310,6 +317,56 @@ class Keyboard:
                 f"keyboard rejected [{name}]: status byte "
                 f"{reply[ACK_OFFSET]:#04x}"
             )
+
+    #: How many reports :meth:`unstick` will feed before giving up.
+    #: The largest animation the firmware takes is 941 frames of 975
+    #: bytes, which is 14,336 blocks, so anything past that is not an
+    #: unfinished upload and feeding it more would not help.
+    UNSTICK_CAP = 14500
+
+    def stuck(self) -> bool:
+        """Is the keyboard still waiting for the rest of an upload?
+
+        ``0x00`` to a bare read is the signature. A keyboard mid-upload
+        answers it to everything -- see :meth:`unstick` for why -- and a
+        healthy one answers ``0x01``.
+        """
+        return self.t.get_feature()[ACK_OFFSET] == ACK_STUCK
+
+    def unstick(self, progress=None) -> int:
+        """Free a keyboard left waiting for the rest of an upload.
+
+        Once a block count is announced the firmware takes *every*
+        64-byte report as payload: there is no escape sequence, and it
+        answers ``0x00`` to everything until the count is met. A session
+        that was interrupted mid-upload therefore leaves the command
+        channel dead, and nothing else -- not per-key colour, not an
+        effect, not a remap -- can get through until the outstanding
+        blocks are made up. Which is exactly what this does, with blank
+        blocks, then closes the transaction the count belonged to.
+
+        Returns the number of blocks it had to feed.
+        """
+        fed = 0
+        # The firmware is swallowing these, not pacing against us, and
+        # the protocol's 15ms would make a full flush take four minutes.
+        was, self.t.pacing = self.t.pacing, FLUSH_PACING
+        try:
+            while fed < self.UNSTICK_CAP and self.stuck():
+                self.t.set_feature(BLANK_BLOCK)
+                fed += 1
+                if progress is not None and fed % 250 == 0:
+                    progress(fed)
+        finally:
+            self.t.pacing = was
+        # The count is met but the transaction it belonged to is still
+        # open -- which reads as busy, not dead. Close it.
+        try:
+            self._step(control(SUB_APPLY))
+        except TransportError:
+            pass
+        self._end_quietly()
+        return fed
 
     def transaction(self, *frames: bytes) -> None:
         """Run the driver's begin/select/apply/end envelope around frames.

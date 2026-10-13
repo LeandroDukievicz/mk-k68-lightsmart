@@ -178,6 +178,10 @@ Useful for protocol work, since it sends one packet at a time.
 # light one key
 ./mk-k68-lightsmart key Esc FF0000
 
+# free a keyboard that stopped answering, which is what an upload
+# interrupted partway leaves behind. The app does this by itself.
+./mk-k68-lightsmart unstick
+
 # list the built-in animations and the mode byte each one uses
 ./mk-k68-lightsmart effects
 

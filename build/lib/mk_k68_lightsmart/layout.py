@@ -111,6 +111,97 @@ KEYS: tuple[Key, ...] = (
     Key('→', '→', 0x4f, 102, 735, 244, 45, 38),
 )
 
+#: Where each key's entry sits in a key-remap block, by HID usage.
+#:
+#: The remap payload is a flat array of 4-byte records and a key's
+#: record is at ``slot * 4``, so the slot is the key's address in that
+#: block -- not its LED index, which is a different numbering entirely.
+#:
+#: Recovered from the driver's own lookup (`fcn.00457490`): a compiled
+#: switch over ``usage - 4``, with a 236-byte case index at 0x457A10
+#: and a jump table at 0x4578A0 whose arms each return a constant.
+#: Extracted rather than transcribed, then checked against the physical
+#: layout: the slots run in reading order with a stride of 18 between
+#: rows (Esc 1, ` 19, Tab 37, Caps 55, Shift 73, Ctrl 91), and all 69
+#: keys land on a slot of their own.
+REMAP_SLOTS: dict[int, int] = {
+    0x29:   1,   # Esc
+    0x35:  19,   # ~
+    0x1e:  20,   # 1
+    0x1f:  21,   # 2
+    0x20:  22,   # 3
+    0x21:  23,   # 4
+    0x22:  24,   # 5
+    0x23:  25,   # 6
+    0x24:  26,   # 7
+    0x25:  27,   # 8
+    0x26:  28,   # 9
+    0x27:  29,   # 0
+    0x2d:  30,   # -
+    0x2e:  31,   # =
+    0x2b:  37,   # Tab
+    0x14:  38,   # Q
+    0x1a:  39,   # W
+    0x08:  40,   # E
+    0x15:  41,   # R
+    0x17:  42,   # T
+    0x1c:  43,   # Y
+    0x18:  44,   # U
+    0x0c:  45,   # I
+    0x12:  46,   # O
+    0x13:  47,   # P
+    0x2f:  48,   # [
+    0x30:  49,   # ]
+    0x39:  55,   # Caps
+    0x04:  56,   # A
+    0x16:  57,   # S
+    0x07:  58,   # D
+    0x09:  59,   # F
+    0x0a:  60,   # G
+    0x0b:  61,   # H
+    0x0d:  62,   # J
+    0x0e:  63,   # K
+    0x0f:  64,   # L
+    0x33:  65,   # ;
+    0x34:  66,   # "
+    0x31:  67,   # \|
+    0xe1:  73,   # LeftShift
+    0x1d:  74,   # Z
+    0x1b:  75,   # X
+    0x06:  76,   # C
+    0x19:  77,   # V
+    0x05:  78,   # B
+    0x11:  79,   # N
+    0x10:  80,   # M
+    0x36:  81,   # <
+    0x37:  82,   # >
+    0x38:  83,   # ?
+    0xe5:  84,   # RightShift
+    0x28:  85,   # Enter
+    0xe0:  91,   # Control
+    0xe3:  92,   # Win
+    0xe2:  93,   # LeftAlt
+    0x2c:  94,   # Space
+    0xe6:  95,   # RightAlt
+    0xaf:  96,   # Fn
+    0xe4:  98,   # RightCtrl
+    0x50:  99,   # ←
+    0x51: 100,   # ↓
+    0x52: 101,   # ↑
+    0x4f: 102,   # →
+    0x2a: 103,   # Backspace
+    0x4b: 118,   # PgUp
+    0x4c: 119,   # Del
+    0x4e: 121,   # PgDn
+    0x9d: 124,   # SWITCH
+}
+
+
+def remap_slot(key: Key) -> int:
+    """Byte offset aside, where ``key`` lives in a remap block."""
+    return REMAP_SLOTS[key.code]
+
+
 BY_IDENT: dict[str, Key] = {k.ident: k for k in KEYS}
 BY_LIGHT_INDEX: dict[int, Key] = {k.light_index: k for k in KEYS}
 

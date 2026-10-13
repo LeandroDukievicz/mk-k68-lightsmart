@@ -24,7 +24,12 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from . import protocol
 from .matrix import Animation
-from .transport import DeviceGone, DeviceNotFound, TransportError
+from .transport import (
+    ACK_STUCK,
+    DeviceGone,
+    DeviceNotFound,
+    TransportError,
+)
 
 
 class Cancelled(Exception):
@@ -65,6 +70,9 @@ class DeviceWorker(QObject):
         # so only the latest value per key is kept.
         self._pending: dict[int, tuple[int, int, int]] = {}
         self._lock = threading.Lock()
+        # Guards _unstuck against recursing: freeing the keyboard runs
+        # commands of its own, and those go through the same guard.
+        self._recovering = False
 
     # -- lifecycle ------------------------------------------------------
     @Slot()
@@ -101,10 +109,48 @@ class DeviceWorker(QObject):
             self.disconnected.emit(str(exc))
             return False
         except (TransportError, ValueError) as exc:
+            if self._unstuck(exc):
+                return self._guard(what, fn)
             self.status.emit(f"{what} failed: {exc}", False)
             return False
         self.status.emit(f"{what} sent", True)
         return True
+
+    def _unstuck(self, exc: Exception) -> bool:
+        """Free a keyboard still waiting for an interrupted upload.
+
+        An upload that stopped early leaves the firmware reading every
+        report as pixels and answering 0x00 to all of them, so the next
+        command fails and so does every one after it -- the whole app
+        goes dead with nothing but a rejection to show for it, which
+        reads as "the keyboard stopped working" rather than as the one
+        recoverable thing it is. Recognise it, make up the outstanding
+        blocks, and let the caller try again.
+
+        Only once: ``_recovering`` keeps a keyboard that is stuck for
+        some other reason from recursing through here forever.
+        """
+        if self._recovering or self.kb is None:
+            return False
+        if not isinstance(exc, TransportError):
+            return False
+        if f"{ACK_STUCK:#04x}" not in str(exc):
+            return False
+        self._recovering = True
+        try:
+            if not self.kb.stuck():
+                return False
+            self.status.emit(
+                "the keyboard is still waiting for an upload that stopped "
+                "early — finishing it off…", False)
+            fed = self.kb.unstick()
+            self.status.emit(
+                f"keyboard freed after {fed} leftover block(s)", True)
+            return True
+        except (TransportError, ValueError, OSError):
+            return False
+        finally:
+            self._recovering = False
 
     @Slot(object, bool)
     def write_keymap(self, block: bytes, fn_layer: bool) -> None:

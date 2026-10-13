@@ -45,6 +45,34 @@ DEFAULT_SPEED = 0x50
 #: A layer's 1..100 speed setting is sent as this minus the setting.
 SPEED_BASE = 0x66
 
+#: Roughly how long the firmware holds a frame, per unit of the wire
+#: value. Calibrated by eye rather than measured: at wire 66 a library
+#: animation runs at the pace of the GIF it came from, and those are
+#: authored at 100 ms a frame. The three other points agree -- wire 80
+#: reads slow, 52 reads fast, 2 is a blur -- so the byte is a delay and
+#: this is its unit, give or take.
+MS_PER_SPEED_UNIT = 100 / 66
+
+#: The wire value that plays at the rate the vendor's own designs
+#: assume, and the 1-100 setting that sends it.
+NATIVE_WIRE_SPEED = 66
+NATIVE_SPEED = SPEED_BASE - NATIVE_WIRE_SPEED
+
+#: How much faster than that rate the paths that name no speed play.
+#: The native rate is what the designs were drawn at, but read on
+#: sixty-five columns it still crawls, so the default asks for more.
+#: The byte is a frame delay, so the boost divides it. This is the one
+#: number to raise when the strip reads slow, and raising it is all the
+#: next adjustment needs: the help text and the labels are generated
+#: from it, so nothing restates the rate and goes stale.
+#:
+#: 1.5625 is two quarters compounded -- 1.25 read slow, and so did
+#: 1.25 again on top of it.
+PLAYBACK_BOOST = 1.25 * 1.25
+
+#: The setting every path defaults to: the vendor's rate, boosted.
+DEFAULT_PLAYBACK_SPEED = SPEED_BASE - round(NATIVE_WIRE_SPEED / PLAYBACK_BOOST)
+
 BLOCK = 64
 
 # The fast encode path reads an array("I") as four bytes per pixel.
@@ -111,26 +139,47 @@ class Frame:
             raise ValueError(f"expected {ROWS} rows of {COLS}")
         return cls([rgb for row in rows for rgb in row])
 
-    def encode(self, brightness: int = 255) -> bytes:
-        """Pack to the wire form: three bytes per LED, B then G then R.
+    @classmethod
+    def decode(cls, data: bytes) -> "Frame":
+        """Rebuild a frame from :meth:`encode`'s wire bytes.
 
-        On a little-endian host an ``array("I")`` of 0x00RRGGBB already
-        serialises as B, G, R, 0 -- so dropping every fourth byte gives
-        the wire order outright, and the brightness scale is one
-        ``translate`` over the whole frame. Both run in C.
+        What the keyboard is sent is also how the bundled effects are
+        stored, so this is the only reader they need.
+        """
+        if len(data) != FRAME_BYTES:
+            raise ValueError(
+                f"a frame is {FRAME_BYTES} bytes on the wire, got {len(data)}"
+            )
+        frame = cls()
+        pixels = frame.pixels
+        for i in range(LEDS):
+            r, g, b = data[i * 3], data[i * 3 + 1], data[i * 3 + 2]
+            pixels[i] = (r << 16) | (g << 8) | b
+        return frame
+
+    def encode(self, brightness: int = 255) -> bytes:
+        """Pack to the wire form: three bytes per LED, R then G then B.
+
+        The driver writes its pixel out low byte first (0x42A27C,
+        0x42A284, 0x42A290), and the pixel it holds is a Win32
+        ``COLORREF`` -- 0x00BBGGRR -- so what lands on the wire is R, G,
+        B. Confirmed on hardware: sending B, G, R put every green pixel
+        on the blue channel.
+
+        Byte-swapping an ``array("I")`` of 0x00RRGGBB makes it serialise
+        as 00, R, G, B, so dropping every fourth byte leaves the wire
+        order outright. That and the brightness ``translate`` both run
+        in C, which is what keeps a 941-frame encode off the stopwatch.
         """
         if not 0 <= brightness <= 255:
             raise ValueError("brightness is 0..255")
 
+        values = self.pixels
         if _LITTLE_ENDIAN:
-            raw = bytearray(self.pixels.tobytes())
-            del raw[3::4]
-        else:
-            raw = bytearray(FRAME_BYTES)
-            for i, rgb in enumerate(self.pixels):
-                raw[i * 3] = rgb & 0xFF
-                raw[i * 3 + 1] = (rgb >> 8) & 0xFF
-                raw[i * 3 + 2] = (rgb >> 16) & 0xFF
+            values = array("I", values)   # byteswap is in place; copy first
+            values.byteswap()
+        raw = bytearray(values.tobytes())
+        del raw[0::4]
 
         if brightness == 255:
             return bytes(raw)
@@ -149,6 +198,21 @@ def speed_to_byte(setting: int | None) -> int:
     if setting is None:
         return DEFAULT_SPEED
     return SPEED_BASE - max(0, min(100, setting))
+
+
+def speed_for_ms(milliseconds: float) -> int:
+    """The 1-100 setting that holds a frame for about that long.
+
+    The scale is inverted and short -- the whole usable range is about
+    3 ms to 150 ms a frame -- so this clamps rather than pretending.
+    """
+    wire = max(1, min(SPEED_BASE - 1, round(milliseconds / MS_PER_SPEED_UNIT)))
+    return SPEED_BASE - wire
+
+
+def frame_ms(setting: int | None) -> float:
+    """About how long a frame lasts at ``setting``."""
+    return speed_to_byte(setting) * MS_PER_SPEED_UNIT
 
 
 @dataclass
@@ -175,12 +239,14 @@ class Animation:
             raise ValueError("an animation needs at least one frame")
 
         count = len(frames)
-        if self.boot:
-            header = struct.pack("<HH", count, speed_to_byte(self.speed))
-        else:
-            # The driver reserves two bytes here and fills in the frame
-            # count; the speed travels with the layer's own settings.
-            header = struct.pack("<H", count)
+        # Both commands take the same 4-byte header -- frame count then
+        # speed, each little-endian 16-bit. The animation path sets its
+        # first pixel offset to 4 (0x42A190) exactly as the boot path
+        # does, after writing the count at 0x42A11C and the speed at
+        # 0x42A187. Reading this as a 2-byte header shifted every pixel
+        # two bytes early, which the strip showed as a green/blue swap:
+        # the firmware had taken the first pixel's B and G for the speed.
+        header = struct.pack("<HH", count, speed_to_byte(self.speed))
 
         bright = brightness_to_byte(self.brightness)
         body = b"".join(f.encode(bright) for f in frames)
@@ -209,11 +275,18 @@ class Animation:
     def _blocks_for(data_len: int) -> int:
         """Blocks to announce and send for ``data_len`` bytes of data.
 
-        The driver's own count is ``(len >> 6) + 1`` (0x429CF3). It writes
-        the terminator into a buffer far larger than it sends, so for the
-        few lengths where ``len % 64 >= 62`` its magic falls outside the
-        transmitted range. We send one more block in that case, which keeps
-        the announced and streamed counts equal and the terminator intact.
+        The driver counts twice and can disagree with itself. It
+        announces ``((frames * 975 + 2) >> 6) + 1`` (0x42A0A0-0x42A0B1)
+        but hands the sender ``frames * 975 + 4`` (0x42A2B5), whose own
+        count is ``(len >> 6) + 1`` -- so at 4 frames, and every 64
+        frames after, it announces one block fewer than it streams. We
+        use the transmitted length for both, so the keyboard is told
+        exactly what it then receives.
+
+        The driver also writes the terminator into a buffer far larger
+        than it sends, so for the few lengths where ``len % 64 >= 62``
+        its magic falls outside the transmitted range. We send one more
+        block in that case, which keeps the terminator intact.
         """
         blocks = (data_len >> 6) + 1
         if data_len + 3 > blocks * BLOCK:

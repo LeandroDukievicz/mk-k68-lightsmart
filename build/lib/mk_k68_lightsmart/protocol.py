@@ -40,6 +40,7 @@ from .transport import (
     ACK_OK,
     ACK_RETRY,
     REPORT_SIZE,
+    DeviceGone,
     KT68Transport,
     TransportError,
 )
@@ -115,12 +116,159 @@ class Effect:
 
     ``mode`` is byte 0 of the data frame.  The names come from the
     driver's own English resource file (``language/1033.lan``, ids
-    200-221); the numeric modes are **not** stated there and are the part
-    still to be confirmed against hardware.
+    200-221); the modes come from the driver filling its effect list,
+    which carries each entry's mode as the list item's data and reads it
+    back with ``GetItemData`` when the selection changes.
     """
 
     mode: int
     name: str
+
+
+#: The effect list, in the order the vendor UI shows it.
+#:
+#: Recovered from the list population at 0x43BFA0-0x43C5FF: each entry is
+#: ``AddString(name, mode, -1)`` with the name loaded from string id
+#: 200+row, and the handler at 0x430020 reads the selected item's data
+#: back (``GetCurSel`` then ``GetItemData``) into the field it later
+#: writes as byte 0.
+#:
+#: So the mode is the row *plus one*, except Close Backlight, which is
+#: zero -- an off switch rather than an animation. Strings 220 and 221
+#: ("Inwards", "Floweriness") name effects this keyboard's list never
+#: offers, so they have no mode here.
+EFFECTS = (
+    Effect(0x01, "Static"),
+    Effect(0x02, "SingleOn"),
+    Effect(0x03, "SingleOff"),
+    Effect(0x04, "Glittering"),
+    Effect(0x05, "Falling"),
+    Effect(0x06, "Colourful"),
+    Effect(0x07, "Breath"),
+    Effect(0x08, "Spectrum"),
+    Effect(0x09, "Outward"),
+    Effect(0x0A, "Scrolling"),
+    Effect(0x0B, "Rolling"),
+    Effect(0x0C, "Rotating"),
+    Effect(0x0D, "Explode"),
+    Effect(0x0E, "Launch"),
+    Effect(0x0F, "Ripples"),
+    Effect(0x10, "Flowing"),
+    Effect(0x11, "Pulsating"),
+    Effect(0x12, "Tilt"),
+    Effect(0x13, "Shuttle"),
+    Effect(0x00, "Close Backlight"),
+)
+
+EFFECT_BY_MODE = {e.mode: e for e in EFFECTS}
+EFFECT_BY_NAME = {e.name.lower(): e for e in EFFECTS}
+
+
+def effect_mode(text: str) -> int:
+    """Resolve an effect name, or a number, to a mode byte."""
+    found = EFFECT_BY_NAME.get(text.strip().lower())
+    if found is not None:
+        return found.mode
+    try:
+        return int(text, 0)
+    except ValueError:
+        raise ValueError(
+            f"no effect called {text!r}; try one of: "
+            + ", ".join(e.name for e in EFFECTS)
+        ) from None
+
+
+# -- key remapping -----------------------------------------------------
+#
+# Decoded but never sent: see the note at the end of docs/PROTOCOL.md
+# §7. The encoder is here so it can be tested and compared against the
+# driver; writing one to a keyboard is a separate decision.
+
+#: Bytes in a remap block, and in each key's record.
+REMAP_BYTES = 694
+REMAP_RECORD = 4
+
+#: Where the AA 55 goes, past the records rather than at the end.
+REMAP_MAGIC_AT = 574
+
+#: How many of a block's bytes actually reach the keyboard.
+#:
+#: The driver hands its sender all 694 (`0x4171DC`), but that sender
+#: transmits `(len >> 6) - 1` reports of 64 bytes (`0x455FF1`) -- so 576
+#: go out and the last 118 never leave the host. That is not a quirk to
+#: work around: 576 is the byte after the `AA 55` at
+#: :data:`REMAP_MAGIC_AT`, which is exactly why the magic sits short of
+#: the block's end instead of at it. The tail is the vendor's struct,
+#: not the wire format.
+REMAP_SENT = 576
+
+#: Record types the driver writes.
+REMAP_UNCHANGED = (0x05, 0x03, 0x00, 0x00)
+REMAP_KEY = 0x02
+
+#: Modifier usages and their bit in the HID modifier byte
+#: (`fcn.004588A0`: a switch on usage - 0xE0 over eight arms).
+MODIFIER_BITS = {0xE0 + n: 1 << n for n in range(8)}
+
+
+def modifier_mask(usage: int) -> int:
+    """What the driver turns a usage into for the record's byte 1.
+
+    A modifier becomes its bit; everything else passes through, and
+    zero stays zero.
+    """
+    if not usage:
+        return 0
+    return MODIFIER_BITS.get(usage, usage)
+
+
+def remap_record(usage: int, modifiers: int = 0) -> tuple[int, int, int, int]:
+    """One key's four bytes: remap it to ``usage`` held with ``modifiers``.
+
+    Mapping a key *to* a modifier puts the mask in byte 1 and leaves
+    byte 2 clear, which is what the driver does at 0x41728B.
+    """
+    if usage in MODIFIER_BITS and not modifiers:
+        return (REMAP_KEY, MODIFIER_BITS[usage], 0x00, 0x00)
+    return (REMAP_KEY, modifier_mask(modifiers), usage & 0xFF, 0x00)
+
+
+def remap_block(changes: dict[int, tuple[int, int]] | None = None) -> bytes:
+    """The 694 bytes of a keymap, with ``changes`` applied.
+
+    ``changes`` maps a key's slot (see :data:`layout.REMAP_SLOTS`) to
+    ``(usage, modifiers)``. Everything not named keeps the record the
+    driver writes for a key left alone.
+    """
+    from .layout import REMAP_SLOTS
+
+    buf = bytearray(REMAP_BYTES)
+    for slot in set(REMAP_SLOTS.values()):
+        at = slot * REMAP_RECORD
+        if at + REMAP_RECORD <= REMAP_MAGIC_AT:
+            buf[at:at + REMAP_RECORD] = bytes(REMAP_UNCHANGED)
+
+    for slot, (usage, modifiers) in (changes or {}).items():
+        at = slot * REMAP_RECORD
+        if at + REMAP_RECORD > REMAP_BYTES:
+            raise ValueError(f"slot {slot} is outside a {REMAP_BYTES}-byte block")
+        buf[at:at + REMAP_RECORD] = bytes(remap_record(usage, modifiers))
+
+    buf[REMAP_MAGIC_AT], buf[REMAP_MAGIC_AT + 1] = FRAME_MAGIC
+    return bytes(buf)
+
+
+def remap_defaults() -> bytes:
+    """The block the vendor's own "Reset Keyboard Data" writes.
+
+    There is no reset command. The menu item (string 410) confirms, then
+    queues operation 4, and the dispatcher case 4
+    (`method.KeyboardDlg.virtual_0` at `0x43A856`) calls the keymap
+    sender and the Fn-layer sender -- nothing else. So the way back from
+    a keymap written wrong is this block through :data:`SUB_KEYMAP`, and
+    the same through :data:`SUB_FNLAYER`, both of which are already here.
+    """
+    return remap_block()
 
 
 class Keyboard:
@@ -200,7 +348,7 @@ class Keyboard:
         self.transaction(data_frame(mode, rgb, p8, brightness, speed, direction))
 
     # -- dot-matrix strip -----------------------------------------------
-    def upload_animation(self, animation, progress=None) -> int:
+    def upload_animation(self, animation, progress=None, drain=None) -> int:
         """Push an animation to the 65x5 strip.
 
         Mirrors the driver's bulk path: announce the block count, stream
@@ -208,8 +356,23 @@ class Keyboard:
         the duration -- unplugging it midway leaves the upload unfinished,
         which is what the vendor manual warns about.
 
+        **An upload cannot be abandoned.** Once the count is announced,
+        the firmware treats every report it receives as payload until it
+        has them all -- the ``04 02`` and ``04 F0`` that end any other
+        transaction are swallowed as pixels like everything else.
+        Measured: cancelling at block 128 of 458 left the keyboard
+        answering ``0x00`` to every command until exactly the 330
+        outstanding reports had been sent, and only then did ``04 02``,
+        ``04 F0`` bring the command channel back.
+
+        So a stream that stops early is *finished* with blank blocks
+        rather than cut short. That costs the same 15 ms a block, which
+        is the firmware's price for the cancel, not ours.
+
         ``progress`` is called with ``(chunk, total)`` as the payload goes
-        out, so a GUI can show a bar. Returns the chunks sent.
+        out, so a GUI can show a bar; raising from it is how a caller
+        cancels. ``drain`` is called with ``(sent, total)`` while the
+        blanks go out, and must not raise. Returns the chunks sent.
         """
         payload = animation.payload()
         if len(payload) % REPORT_SIZE:
@@ -226,17 +389,95 @@ class Keyboard:
             self._step(control(animation.command,
                                b8=blocks & 0xFF, b9=(blocks >> 8) & 0xFF))
             sent = 0
-            for i in range(blocks):
-                self.t.set_feature(
-                    payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
-                )
-                sent += 1
-                if progress is not None:
-                    progress(sent, blocks)
+            try:
+                for i in range(blocks):
+                    self.t.set_feature(
+                        payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
+                    )
+                    sent += 1
+                    if progress is not None:
+                        progress(sent, blocks)
+            except DeviceGone:
+                raise                      # nothing left to drain into
+            except BaseException:
+                # Cancelled, or the stream failed. Either way the count
+                # has to be met before the keyboard listens again.
+                self._drain_blocks(blocks - sent, drain)
+                self._apply_quietly()
+                raise
             self._step(control(SUB_APPLY))
         finally:
             self._end_quietly()
         return sent
+
+    def _drain_blocks(self, remaining: int, report=None) -> None:
+        """Feed the firmware the blocks it is still counting on.
+
+        Blank ones: the picture is being abandoned and only the count
+        matters. If a transfer fails here there is nothing further to
+        try -- the device is gone or wedged, and the caller's own error
+        is the one worth reporting, so this returns quietly.
+        """
+        blank = bytes(REPORT_SIZE)
+        for done in range(1, remaining + 1):
+            try:
+                self.t.set_feature(blank)
+            except TransportError:
+                return
+            if report is not None:
+                report(done, remaining)
+
+    def _apply_quietly(self) -> None:
+        """Apply, swallowing a secondary failure.
+
+        After a drain the keyboard wants its ``04 02`` before it will
+        answer anything else; what it then shows is half an animation,
+        which beats a keyboard that ignores the host.
+        """
+        try:
+            self._step(control(SUB_APPLY))
+        except TransportError:
+            pass
+
+    # -- key remapping --------------------------------------------------
+    def write_keymap(self, block: bytes, fn_layer: bool = False) -> int:
+        """Make ``block`` the keyboard's keymap, or its Fn layer.
+
+        **This persists.** A keymap survives a power cycle and an
+        unplug, so a wrong one keeps typing the wrong letters until
+        something writes a right one. That something is
+        :func:`remap_defaults`, which is the same block the vendor's own
+        reset writes -- there is no reset command to fall back on.
+
+        The envelope is the driver's, and it is *not*
+        :meth:`transaction`: the keymap path goes straight from begin to
+        the announce with no ``04 13`` in between (`0x416F6D`), because
+        there is no lighting target to select. Byte 8 of the announce is
+        9 (`0x416F9A`), which is the one field the driver sets.
+
+        Only :data:`REMAP_SENT` of the block goes out, in 64-byte
+        reports. Returns how many were sent.
+        """
+        if len(block) < REMAP_SENT:
+            raise ValueError(
+                f"a remap block is at least {REMAP_SENT} bytes, got "
+                f"{len(block)}"
+            )
+        sub = SUB_FNLAYER if fn_layer else SUB_KEYMAP
+        payload = block[:REMAP_SENT]
+        blocks = REMAP_SENT // REPORT_SIZE
+
+        self._step(control(SUB_BEGIN))
+        try:
+            self._step(control(sub, b8=0x09))
+            for i in range(blocks):
+                self.t.set_feature(
+                    payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
+                )
+            self._step(control(SUB_APPLY))
+        finally:
+            self._end_quietly()
+        return blocks
 
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.

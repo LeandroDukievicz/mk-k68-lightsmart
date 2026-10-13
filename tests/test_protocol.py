@@ -522,3 +522,100 @@ class KeymapWrite(unittest.TestCase):
     def test_a_block_too_short_to_hold_the_records_is_refused(self):
         with self.assertRaises(ValueError):
             self.kb.write_keymap(bytes(protocol.REMAP_SENT - 1))
+
+
+class StuckTransport:
+    """A keyboard still swallowing the blocks of an interrupted upload.
+
+    Answers 0x00 to everything -- which is what the firmware does, and
+    is not an error code: it is reading the report as pixels -- until
+    the outstanding count has been fed, and 0x01 after that.
+    """
+
+    path = "/dev/hidraw-fake"
+
+    def __init__(self, outstanding: int, pacing: float = 0.0):
+        self.outstanding = outstanding
+        self.pacing = pacing
+        self.sent: list[bytes] = []
+        self.paced_at: list[float] = []
+
+    def set_feature(self, payload: bytes) -> None:
+        self.sent.append(bytes(payload))
+        self.paced_at.append(self.pacing)
+        if self.outstanding:
+            self.outstanding -= 1
+
+    def get_feature(self) -> bytes:
+        reply = bytearray(transport.REPORT_SIZE)
+        reply[transport.ACK_OFFSET] = (
+            transport.ACK_STUCK if self.outstanding else transport.ACK_OK)
+        return bytes(reply)
+
+    def close(self) -> None:
+        pass
+
+
+class FreeingAStuckKeyboard(unittest.TestCase):
+    """The recovery PROTOCOL.md section 6 describes, as code.
+
+    An upload that stops early leaves the firmware taking every report
+    as payload and answering 0x00 to all of them, so no command gets
+    through until the promised count is made up. Measured on hardware:
+    the channel came back after the outstanding blocks and an apply/end.
+    """
+
+    def test_a_healthy_keyboard_is_not_stuck(self):
+        kb = protocol.Keyboard(StuckTransport(0))
+        self.assertFalse(kb.stuck())
+
+    def test_a_keyboard_mid_upload_reads_as_stuck(self):
+        kb = protocol.Keyboard(StuckTransport(3))
+        self.assertTrue(kb.stuck())
+
+    def test_it_feeds_exactly_the_outstanding_blocks(self):
+        t = StuckTransport(7)
+        kb = protocol.Keyboard(t)
+        self.assertEqual(kb.unstick(), 7)
+        self.assertFalse(kb.stuck())
+
+    def test_the_blocks_it_feeds_are_blank(self):
+        # They are being read as pixels, and the picture is already
+        # lost; sending anything else would paint with garbage.
+        t = StuckTransport(3)
+        protocol.Keyboard(t).unstick()
+        self.assertEqual(t.sent[:3], [bytes(transport.REPORT_SIZE)] * 3)
+
+    def test_it_closes_the_transaction_the_count_belonged_to(self):
+        # Meeting the count leaves the transaction open, which reads as
+        # busy rather than dead, so apply and end still have to go.
+        t = StuckTransport(2)
+        protocol.Keyboard(t).unstick()
+        self.assertEqual(
+            [hexs(p, 2) for p in t.sent[-2:]], ["04 02", "04 F0"])
+
+    def test_a_keyboard_already_free_is_left_alone(self):
+        t = StuckTransport(0)
+        self.assertEqual(protocol.Keyboard(t).unstick(), 0)
+        # Only the closing pair, no blocks.
+        self.assertEqual(len(t.sent), 2)
+
+    def test_it_gives_up_rather_than_feeding_forever(self):
+        # A keyboard stuck for some other reason would never answer,
+        # and an unbounded loop would hang the app that called this.
+        t = StuckTransport(protocol.Keyboard.UNSTICK_CAP + 50)
+        fed = protocol.Keyboard(t).unstick()
+        self.assertEqual(fed, protocol.Keyboard.UNSTICK_CAP)
+
+    def test_it_flushes_faster_than_the_command_pacing(self):
+        # The 15ms exists so the firmware does not drop commands. These
+        # are not commands, and at 15ms a full flush is four minutes.
+        t = StuckTransport(4, pacing=transport.PACING)
+        protocol.Keyboard(t).unstick()
+        self.assertTrue(
+            all(p == transport.FLUSH_PACING for p in t.paced_at[:4]))
+
+    def test_the_pacing_is_put_back_afterwards(self):
+        t = StuckTransport(4, pacing=transport.PACING)
+        protocol.Keyboard(t).unstick()
+        self.assertEqual(t.pacing, transport.PACING)

@@ -63,6 +63,28 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_unstick(args: argparse.Namespace) -> int:
+    """Free a keyboard still waiting for an upload that stopped early.
+
+    The app does this by itself when a command comes back rejected, so
+    this is for the case where it is wanted without opening the app --
+    or where the CLI is what is being used in the first place.
+    """
+    with protocol.Keyboard() as kb:
+        if not kb.stuck():
+            print("the keyboard is answering normally — nothing to free")
+            return 0
+        print("the keyboard is waiting for the rest of an upload; "
+              "making up the outstanding blocks…")
+        fed = kb.unstick(progress=lambda n: print(f"  {n} blocks…"))
+        if kb.stuck():
+            print(f"still waiting after {fed} blocks — unplug it and "
+                  f"plug it back in")
+            return 1
+        print(f"freed after {fed} block(s)")
+    return 0
+
+
 def cmd_keys(args: argparse.Namespace) -> int:
     for k in sorted(layout.KEYS, key=lambda k: k.light_index):
         label = "" if k.ident == k.name else f'  (printed "{k.name}")'
@@ -610,6 +632,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("info", help="show the detected device (read-only)").set_defaults(func=cmd_info)
     sub.add_parser("keys", help="list keys and their LED indices").set_defaults(func=cmd_keys)
+    sub.add_parser(
+        "unstick",
+        help="free a keyboard left waiting for an interrupted upload",
+    ).set_defaults(func=cmd_unstick)
 
     r = sub.add_parser("raw", help="send a raw payload, as hex bytes")
     r.add_argument("hex", help='e.g. "04 18" or 0418')
