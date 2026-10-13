@@ -12,6 +12,7 @@ import sys
 import time
 
 from . import layout, matrix, protocol
+from . import __version__
 from . import transport
 from .transport import DeviceNotFound, KT68Transport, TransportError
 
@@ -60,6 +61,28 @@ def cmd_info(args: argparse.Namespace) -> int:
         print(f"keys              : {len(layout.KEYS)}")
         print(f"dot-matrix        : 65 x 5 = 325 LEDs")
         print(f"feature read      : {_hex(t.get_feature())}")
+    return 0
+
+
+def cmd_unstick(args: argparse.Namespace) -> int:
+    """Free a keyboard still waiting for an upload that stopped early.
+
+    The app does this by itself when a command comes back rejected, so
+    this is for the case where it is wanted without opening the app --
+    or where the CLI is what is being used in the first place.
+    """
+    with protocol.Keyboard() as kb:
+        if not kb.stuck():
+            print("the keyboard is answering normally — nothing to free")
+            return 0
+        print("the keyboard is waiting for the rest of an upload; "
+              "making up the outstanding blocks…")
+        fed = kb.unstick(progress=lambda n: print(f"  {n} blocks…"))
+        if kb.stuck():
+            print(f"still waiting after {fed} blocks — unplug it and "
+                  f"plug it back in")
+            return 1
+        print(f"freed after {fed} block(s)")
     return 0
 
 
@@ -377,6 +400,9 @@ def cmd_pattern(args: argparse.Namespace) -> int:
     print(f"frames        : {len(frames)}")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
+    print(f"playback      : speed {args.speed}, about "
+          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
+          f"{len(frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -412,12 +438,17 @@ def cmd_image(args: argparse.Namespace) -> int:
     blocks = animation.block_count()
     kept = (f"every {args.stride} of {loaded.available}" if args.stride > 1
             else f"all {loaded.available}")
+    if loaded.truncated:
+        kept += f" (first {len(loaded.frames)} kept; frame limit)"
     print(f"source        : {loaded.size[0]}x{loaded.size[1]}, "
           f"{loaded.available} frame(s)"
           + (f", {loaded.delay_ms} ms apart" if loaded.delay_ms else ""))
     print(f"importing     : {len(loaded.frames)} frames ({kept})")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
+    print(f"playback      : speed {args.speed}, about "
+          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
+          f"{len(loaded.frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -433,6 +464,83 @@ def cmd_image(args: argparse.Namespace) -> int:
     with protocol.Keyboard() as kb:
         kb.upload_animation(animation, progress=report)
     print()
+    return 0
+
+
+def _parse_remap(text: str) -> tuple[int, int]:
+    """Turn ``KEY=USAGE`` into the slot and the usage it should send."""
+    name, _, usage = text.partition("=")
+    if not usage:
+        raise ValueError(f"expected KEY=USAGE, got {text!r}")
+    key = layout.BY_LIGHT_INDEX[_resolve_key(name.strip())]
+    try:
+        code = int(usage.strip(), 0)
+    except ValueError:
+        raise ValueError(f"{usage.strip()!r} is not a HID usage") from None
+    if not 0 <= code <= 0xFF:
+        raise ValueError(f"usage {code:#x} is not a byte")
+    return layout.remap_slot(key), code
+
+
+def cmd_remap(args: argparse.Namespace) -> int:
+    """Write the key map, or put the vendor's own default back.
+
+    The reset turned out not to be a command: the vendor's "Reset
+    Keyboard Data" writes this same default block through the same
+    0x11, so `--defaults` is the way back from a map written wrong and
+    there is nothing else behind it. That is the whole reason this
+    command can exist.
+    """
+    if args.defaults == bool(args.set):
+        raise ValueError("pass either --defaults or --set KEY=USAGE, not both")
+
+    named: list[tuple[str, int]] = []
+    if args.defaults:
+        block = protocol.remap_defaults()
+        what = "the vendor's default map - every key left as it is"
+    else:
+        changes: dict[int, tuple[int, int]] = {}
+        for text in args.set:
+            slot, usage = _parse_remap(text)
+            named.append((text.partition("=")[0].strip(), slot))
+            changes[slot] = (usage, 0)
+        block = protocol.remap_block(changes)
+        what = f"{len(changes)} of 69 keys"
+
+    layer = "Fn layer" if args.fn_layer else "keymap"
+    blocks = protocol.REMAP_SENT // transport.REPORT_SIZE
+    print(f"target        : {layer}")
+    print(f"writing       : {what}")
+    print(f"payload       : {protocol.REMAP_SENT} of {len(block)} bytes, "
+          f"{blocks} blocks")
+    # A persistent write earns showing what it changes, record by
+    # record, rather than a byte count to be taken on trust.
+    for name, slot in named:
+        at = slot * protocol.REMAP_RECORD
+        print(f"  {name:<12} slot {slot:>3}  "
+              f"{block[at:at + protocol.REMAP_RECORD].hex(' ')}")
+
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    # A keymap outlives the process that wrote it, which none of the
+    # other commands here do. So this one asks, unless told not to.
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise ValueError(
+                "a keymap persists across a power cycle, so this asks before "
+                "writing. Run it in a terminal, or pass --yes"
+            )
+        print("\nthis persists across a power cycle. "
+              "'mk-k68-lightsmart remap --defaults' is the way back.")
+        if input("write it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("nothing sent")
+            return 0
+
+    with protocol.Keyboard() as kb:
+        sent = kb.write_keymap(block, fn_layer=args.fn_layer)
+    print(f"sent          : {sent} blocks")
     return 0
 
 
@@ -511,15 +619,27 @@ def cmd_effects(args: argparse.Namespace) -> int:
     return 0
 
 
+def speed_help() -> str:
+    """The --speed help, generated so a change of rate cannot stale it."""
+    return (f"1-100; the default is {matrix.PLAYBACK_BOOST:g}x the rate the "
+            f"vendor's own designs assume, about "
+            f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="mk-k68-lightsmart",
         description="Control a 68-key LightSmart keyboard over its vendor HID channel.",
     )
+    p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("info", help="show the detected device (read-only)").set_defaults(func=cmd_info)
     sub.add_parser("keys", help="list keys and their LED indices").set_defaults(func=cmd_keys)
+    sub.add_parser(
+        "unstick",
+        help="free a keyboard left waiting for an interrupted upload",
+    ).set_defaults(func=cmd_unstick)
 
     r = sub.add_parser("raw", help="send a raw payload, as hex bytes")
     r.add_argument("hex", help='e.g. "04 18" or 0418')
@@ -568,6 +688,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
 
+    rm = sub.add_parser(
+        "remap", help="write the key map (it persists across a power cycle)")
+    rm.add_argument("--set", action="append", metavar="KEY=USAGE",
+                    help="remap one key to a HID usage; repeatable")
+    rm.add_argument("--defaults", action="store_true",
+                    help="write the map the vendor's own reset writes, "
+                         "which is the way back from a wrong one")
+    rm.add_argument("--fn-layer", action="store_true", dest="fn_layer",
+                    help="write the Fn layer instead of the base map")
+    rm.add_argument("--yes", action="store_true",
+                    help="do not ask before writing")
+    rm.add_argument("--dry-run", action="store_true")
+    rm.set_defaults(func=cmd_remap)
+
     u = sub.add_parser(
         "install-udev", help="install the udev rule the keyboard needs")
     u.add_argument("--force", action="store_true",
@@ -581,9 +715,8 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--frames-each", type=int, default=1, dest="frames_each",
                    help="frames per panel (default 1)")
     m.add_argument("--brightness", type=int, default=100, help="0-100")
-    m.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    m.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help=speed_help())
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
 
@@ -594,17 +727,17 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="SECONDS", help="seconds per effect (default 300)")
     ro.add_argument("--shuffle", action="store_true")
     ro.add_argument("--brightness", type=int, default=100, help="0-100")
-    ro.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                    help="1-100; the default is the vendor's own rate")
+    ro.add_argument("--speed", type=int,
+                    default=matrix.DEFAULT_PLAYBACK_SPEED,
+                    help=speed_help())
     ro.set_defaults(func=cmd_rotate)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
     pt.add_argument("name", nargs="?",
                     help="which one; omit to list them")
     pt.add_argument("--brightness", type=int, default=100, help="0-100")
-    pt.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    pt.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help=speed_help())
     pt.add_argument("--dry-run", action="store_true")
     pt.set_defaults(func=cmd_pattern)
 
@@ -614,9 +747,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep every nth frame (default 1)")
     i.add_argument("--frames", type=int, help="stop after this many frames")
     i.add_argument("--brightness", type=int, default=100, help="0-100")
-    i.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    i.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help=speed_help())
     i.add_argument("--dry-run", action="store_true")
     i.set_defaults(func=cmd_image)
 

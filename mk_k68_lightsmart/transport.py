@@ -45,6 +45,17 @@ ACK_OFFSET = 3
 ACK_OK = 0x01
 ACK_RETRY = 0xFF
 
+#: What a keyboard mid-upload answers to everything, until the block
+#: count it was promised has been made up. Not an error code: the
+#: firmware is reading the report as pixels, not as a command.
+ACK_STUCK = 0x00
+
+#: Pacing while feeding an interrupted upload its outstanding blocks.
+#: The 15 ms above exists so the firmware does not drop *commands*;
+#: these are not commands, and at 15 ms a full flush would take four
+#: minutes.
+FLUSH_PACING = 0.002
+
 
 def _ioc(direction: int, typ: int, nr: int, size: int) -> int:
     return (direction << 30) | (size << 16) | (typ << 8) | nr
@@ -142,14 +153,8 @@ RULE_DIR = "/etc/udev/rules.d"
 
 
 def rule_source() -> str:
-    """This installation's copy of the rule.
-
-    A snap is read-only and mounted somewhere else entirely, so the
-    path has to be the one this process can actually see.
-    """
-    snap = os.environ.get("SNAP")
-    root = snap if snap else os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))
+    """The udev rule shipped in this source checkout."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "udev", RULE_NAME)
 
 

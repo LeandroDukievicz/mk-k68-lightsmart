@@ -187,6 +187,20 @@ class KeyColours(WorkerCase):
 
 
 @requires_qt
+class LightingEffects(WorkerCase):
+    def test_sends_color_random_flag_brightness_speed_and_direction(self):
+        t = FakeTransport()
+        w = self.make(t)
+        w.set_effect(0x05, 0x12, 0x34, 0x56, 1, 10, 4, 2)
+        self.assertEqual(
+            t.sent[2][:16],
+            protocol.data_frame(
+                0x05, (0x12, 0x34, 0x56), p8=1, p9=10, p10=4, p11=2
+            )[:16],
+        )
+
+
+@requires_qt
 class Uploads(WorkerCase):
     def test_reports_progress_and_finishes(self):
         t = FakeTransport()
@@ -242,6 +256,19 @@ class Uploads(WorkerCase):
             [text for text, _ in self.events["status"]][-1], "upload cancelled"
         )
         self.assertIn("still wants 14 blocks", self.events["status"][0][0])
+
+    def test_cancel_before_the_queued_upload_starts_is_not_lost(self):
+        w = self.make()
+        t = FakeTransport()
+        w.kb = protocol.Keyboard(t)
+        # The window queues the slot, then the user closes before the
+        # worker starts it. This used to be erased by Event.clear().
+        w.prepare_upload()
+        w.cancel()
+        w.upload(self.one_frame())
+        self.assertEqual(self.events["upload_finished"], [(False,)])
+        self.assertEqual(len(t.sent), 20)
+        self.assertEqual(t.sent[4:18], [bytes(transport.REPORT_SIZE)] * 14)
 
     def test_a_failed_block_is_drained_too(self):
         # Same reason: the firmware is counting, and a transfer that

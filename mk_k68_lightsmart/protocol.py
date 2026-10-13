@@ -39,11 +39,18 @@ from .transport import (
     ACK_OFFSET,
     ACK_OK,
     ACK_RETRY,
+    ACK_STUCK,
+    FLUSH_PACING,
     REPORT_SIZE,
     DeviceGone,
     KT68Transport,
     TransportError,
 )
+
+#: One blank 64-byte report, which is what an interrupted upload is fed
+#: to make up its outstanding count. Blank because the firmware is
+#: taking these as pixels and the picture is already lost.
+BLANK_BLOCK = bytes(REPORT_SIZE)
 
 # -- control commands (byte 0 == 0x04, byte 1 == the sub-command) --------
 CMD_PREFIX = 0x04
@@ -191,6 +198,17 @@ REMAP_RECORD = 4
 #: Where the AA 55 goes, past the records rather than at the end.
 REMAP_MAGIC_AT = 574
 
+#: How many of a block's bytes actually reach the keyboard.
+#:
+#: The driver hands its sender all 694 (`0x4171DC`), but that sender
+#: transmits `(len >> 6) - 1` reports of 64 bytes (`0x455FF1`) -- so 576
+#: go out and the last 118 never leave the host. That is not a quirk to
+#: work around: 576 is the byte after the `AA 55` at
+#: :data:`REMAP_MAGIC_AT`, which is exactly why the magic sits short of
+#: the block's end instead of at it. The tail is the vendor's struct,
+#: not the wire format.
+REMAP_SENT = 576
+
 #: Record types the driver writes.
 REMAP_UNCHANGED = (0x05, 0x03, 0x00, 0x00)
 REMAP_KEY = 0x02
@@ -237,14 +255,28 @@ def remap_block(changes: dict[int, tuple[int, int]] | None = None) -> bytes:
         if at + REMAP_RECORD <= REMAP_MAGIC_AT:
             buf[at:at + REMAP_RECORD] = bytes(REMAP_UNCHANGED)
 
+    valid_slots = set(REMAP_SLOTS.values())
     for slot, (usage, modifiers) in (changes or {}).items():
+        if not isinstance(slot, int) or slot not in valid_slots:
+            raise ValueError(f"slot {slot!r} is not a key on this keyboard")
         at = slot * REMAP_RECORD
-        if at + REMAP_RECORD > REMAP_BYTES:
-            raise ValueError(f"slot {slot} is outside a {REMAP_BYTES}-byte block")
         buf[at:at + REMAP_RECORD] = bytes(remap_record(usage, modifiers))
 
     buf[REMAP_MAGIC_AT], buf[REMAP_MAGIC_AT + 1] = FRAME_MAGIC
     return bytes(buf)
+
+
+def remap_defaults() -> bytes:
+    """The block the vendor's own "Reset Keyboard Data" writes.
+
+    There is no reset command. The menu item (string 410) confirms, then
+    queues operation 4, and the dispatcher case 4
+    (`method.KeyboardDlg.virtual_0` at `0x43A856`) calls the keymap
+    sender and the Fn-layer sender -- nothing else. So the way back from
+    a keymap written wrong is this block through :data:`SUB_KEYMAP`, and
+    the same through :data:`SUB_FNLAYER`, both of which are already here.
+    """
+    return remap_block()
 
 
 class Keyboard:
@@ -287,6 +319,56 @@ class Keyboard:
                 f"{reply[ACK_OFFSET]:#04x}"
             )
 
+    #: How many reports :meth:`unstick` will feed before giving up.
+    #: The largest animation the firmware takes is 941 frames of 975
+    #: bytes, which is 14,336 blocks, so anything past that is not an
+    #: unfinished upload and feeding it more would not help.
+    UNSTICK_CAP = 14500
+
+    def stuck(self) -> bool:
+        """Is the keyboard still waiting for the rest of an upload?
+
+        ``0x00`` to a bare read is the signature. A keyboard mid-upload
+        answers it to everything -- see :meth:`unstick` for why -- and a
+        healthy one answers ``0x01``.
+        """
+        return self.t.get_feature()[ACK_OFFSET] == ACK_STUCK
+
+    def unstick(self, progress=None) -> int:
+        """Free a keyboard left waiting for the rest of an upload.
+
+        Once a block count is announced the firmware takes *every*
+        64-byte report as payload: there is no escape sequence, and it
+        answers ``0x00`` to everything until the count is met. A session
+        that was interrupted mid-upload therefore leaves the command
+        channel dead, and nothing else -- not per-key colour, not an
+        effect, not a remap -- can get through until the outstanding
+        blocks are made up. Which is exactly what this does, with blank
+        blocks, then closes the transaction the count belonged to.
+
+        Returns the number of blocks it had to feed.
+        """
+        fed = 0
+        # The firmware is swallowing these, not pacing against us, and
+        # the protocol's 15ms would make a full flush take four minutes.
+        was, self.t.pacing = self.t.pacing, FLUSH_PACING
+        try:
+            while fed < self.UNSTICK_CAP and self.stuck():
+                self.t.set_feature(BLANK_BLOCK)
+                fed += 1
+                if progress is not None and fed % 250 == 0:
+                    progress(fed)
+        finally:
+            self.t.pacing = was
+        # The count is met but the transaction it belonged to is still
+        # open -- which reads as busy, not dead. Close it.
+        try:
+            self._step(control(SUB_APPLY))
+        except TransportError:
+            pass
+        self._end_quietly()
+        return fed
+
     def transaction(self, *frames: bytes) -> None:
         """Run the driver's begin/select/apply/end envelope around frames.
 
@@ -312,16 +394,16 @@ class Keyboard:
 
     # -- lighting -------------------------------------------------------
     def set_effect(self, mode: int, rgb: tuple[int, int, int] = (0, 0, 0),
-                   p8: int = 0, brightness: int = 0, speed: int = 0,
-                   direction: int = 0) -> None:
+                   random_colour: int = 0, brightness: int = 0,
+                   speed: int = 0, direction: int = 0) -> None:
         """Select a built-in animation.
 
-        The driver fills bytes 8-11 from a 20-byte per-effect settings
-        record.  Mapping them to brightness / speed / direction matches
-        the four knobs the UI offers for an effect, but which byte is
-        which has not been confirmed on hardware yet.
+        The driver's per-effect record stores the random-colour flag,
+        RGB, brightness, speed and direction. Its serializer places those
+        values in frame bytes 8, 1-3, 9, 10 and 11 respectively.
         """
-        self.transaction(data_frame(mode, rgb, p8, brightness, speed, direction))
+        self.transaction(
+            data_frame(mode, rgb, random_colour, brightness, speed, direction))
 
     # -- dot-matrix strip -----------------------------------------------
     def upload_animation(self, animation, progress=None, drain=None) -> int:
@@ -414,6 +496,46 @@ class Keyboard:
             self._step(control(SUB_APPLY))
         except TransportError:
             pass
+
+    # -- key remapping --------------------------------------------------
+    def write_keymap(self, block: bytes, fn_layer: bool = False) -> int:
+        """Make ``block`` the keyboard's keymap, or its Fn layer.
+
+        **This persists.** A keymap survives a power cycle and an
+        unplug, so a wrong one keeps typing the wrong letters until
+        something writes a right one. That something is
+        :func:`remap_defaults`, which is the same block the vendor's own
+        reset writes -- there is no reset command to fall back on.
+
+        The envelope is the driver's, and it is *not*
+        :meth:`transaction`: the keymap path goes straight from begin to
+        the announce with no ``04 13`` in between (`0x416F6D`), because
+        there is no lighting target to select. Byte 8 of the announce is
+        9 (`0x416F9A`), which is the one field the driver sets.
+
+        Only :data:`REMAP_SENT` of the block goes out, in 64-byte
+        reports. Returns how many were sent.
+        """
+        if len(block) < REMAP_SENT:
+            raise ValueError(
+                f"a remap block is at least {REMAP_SENT} bytes, got "
+                f"{len(block)}"
+            )
+        sub = SUB_FNLAYER if fn_layer else SUB_KEYMAP
+        payload = block[:REMAP_SENT]
+        blocks = REMAP_SENT // REPORT_SIZE
+
+        self._step(control(SUB_BEGIN))
+        try:
+            self._step(control(sub, b8=0x09))
+            for i in range(blocks):
+                self.t.set_feature(
+                    payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
+                )
+            self._step(control(SUB_APPLY))
+        finally:
+            self._end_quietly()
+        return blocks
 
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.

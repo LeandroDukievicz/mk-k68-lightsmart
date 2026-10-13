@@ -92,6 +92,41 @@ class Loading(unittest.TestCase):
         got = image.load(str(self.path), limit=1)
         self.assertEqual(len(got.frames), 1)
         self.assertEqual(got.available, 2)
+        self.assertTrue(got.truncated)
+
+    def test_a_known_large_animation_stops_decoding_at_the_limit(self):
+        class FakeImage:
+            def isNull(self):
+                return False
+
+        class FakeSize:
+            def width(self): return 640
+            def height(self): return 480
+
+        class FakeReader:
+            def __init__(self, _path): self.reads = 0
+            def setDecideFormatFromContent(self, _value): pass
+            def size(self): return FakeSize()
+            def nextImageDelay(self): return 40
+            def imageCount(self): return 10_000
+            def supportsAnimation(self): return True
+            def read(self):
+                self.reads += 1
+                return FakeImage()
+            def errorString(self): return ""
+
+        with unittest.mock.patch.object(image, "QImageReader", FakeReader), \
+             unittest.mock.patch.object(
+                 image, "frame_from_image", return_value=matrix.Frame()
+             ):
+            got = image.load(str(self.path), limit=3)
+        self.assertEqual(len(got.frames), 3)
+        self.assertEqual(got.available, 10_000)
+        self.assertTrue(got.truncated)
+
+    def test_a_zero_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            image.load(str(self.path), limit=0)
 
     def test_the_keyboards_cap_is_never_exceeded(self):
         got = image.load(str(self.path), limit=10_000)

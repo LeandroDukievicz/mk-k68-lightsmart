@@ -29,10 +29,16 @@ class Imported:
     #: the file's own delay between frames, in ms; 0 if it does not say
     delay_ms: int
     size: tuple[int, int]
+    stride: int = 1
 
     @property
     def animated(self) -> bool:
         return len(self.frames) > 1
+
+    @property
+    def truncated(self) -> bool:
+        """Whether a frame limit omitted selected source frames."""
+        return len(self.frames) < (self.available + self.stride - 1) // self.stride
 
 
 def frame_from_image(image: QImage) -> Frame:
@@ -66,6 +72,8 @@ def load(path: str, *, stride: int = 1, limit: int | None = None) -> Imported:
     """
     if stride < 1:
         raise ValueError("stride is 1 or more")
+    if limit is not None and limit < 1:
+        raise ValueError("limit is 1 or more")
 
     reader = QImageReader(path)
     # Trust the content, not the extension: the library's files are
@@ -73,19 +81,31 @@ def load(path: str, *, stride: int = 1, limit: int | None = None) -> Imported:
     reader.setDecideFormatFromContent(True)
     size = reader.size()
     delay = reader.nextImageDelay()
+    # GIF and other animated plugins commonly know their frame count up
+    # front. Keep it so callers can report the full source length while
+    # avoiding decoding frames they explicitly capped or skipped.
+    known_count = reader.imageCount()
 
     frames: list[Frame] = []
-    available = 0
+    available = max(0, known_count)
     cap = MAX_FRAMES_ANIMATION if limit is None else min(limit, MAX_FRAMES_ANIMATION)
-    while True:
+    index = 0
+    while known_count < 0 or index < known_count:
+        # Once enough output frames have been read, metadata gives us the
+        # true source count without decoding the remaining full-size GIF.
+        if known_count >= 0 and len(frames) >= cap:
+            break
         image = reader.read()
         if image.isNull():
             break
-        if available % stride == 0 and len(frames) < cap:
+        if index % stride == 0:
             frames.append(frame_from_image(image))
-        available += 1
+        index += 1
         if not reader.supportsAnimation():
             break
+
+    if known_count < 0:
+        available = index
 
     if not frames:
         raise ValueError(reader.errorString() or f"{path} holds no image")
@@ -95,4 +115,5 @@ def load(path: str, *, stride: int = 1, limit: int | None = None) -> Imported:
         available=available,
         delay_ms=max(0, delay),
         size=(size.width(), size.height()),
+        stride=stride,
     )

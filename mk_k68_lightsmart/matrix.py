@@ -53,8 +53,25 @@ SPEED_BASE = 0x66
 #: this is its unit, give or take.
 MS_PER_SPEED_UNIT = 100 / 66
 
-#: The setting that plays at the rate the vendor's own designs assume.
-NATIVE_SPEED = SPEED_BASE - 66
+#: The wire value that plays at the rate the vendor's own designs
+#: assume, and the 1-100 setting that sends it.
+NATIVE_WIRE_SPEED = 66
+NATIVE_SPEED = SPEED_BASE - NATIVE_WIRE_SPEED
+
+#: How much faster than that rate the paths that name no speed play.
+#: The native rate is what the designs were drawn at, but read on
+#: sixty-five columns it still crawls, so the default asks for more.
+#: The byte is a frame delay, so the boost divides it. This is the one
+#: number to raise when the strip reads slow, and raising it is all the
+#: next adjustment needs: the help text and the labels are generated
+#: from it, so nothing restates the rate and goes stale.
+#:
+#: 1.5625 is two quarters compounded -- 1.25 read slow, and so did
+#: 1.25 again on top of it.
+PLAYBACK_BOOST = 1.25 * 1.25
+
+#: The setting every path defaults to: the vendor's rate, boosted.
+DEFAULT_PLAYBACK_SPEED = SPEED_BASE - round(NATIVE_WIRE_SPEED / PLAYBACK_BOOST)
 
 BLOCK = 64
 

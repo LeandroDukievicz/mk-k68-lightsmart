@@ -429,11 +429,12 @@ def overall(limit: int = MAX_FRAMES_ANIMATION,
             names: list[str] | None = None) -> list[Frame]:
     """Every effect in turn, inside a single upload.
 
-    The keyboard holds 941 frames, which at the rate its own designs
-    assume is about ninety seconds of playback *in total* -- so this is
-    a showcase, not a schedule: each effect gets an equal share, around
-    four seconds, and the whole thing loops without the host being
-    involved at all.
+    The keyboard holds 941 frames *in total*, so this is a showcase and
+    not a schedule: each of the 25 effects gets an equal share of them,
+    37 frames, and the whole thing loops without the host being
+    involved at all. How long a share lasts is whatever the speed
+    setting makes of 37 frames -- a couple of seconds at the default,
+    and `pattern` prints the figure before it sends.
 
     Where an effect has more frames than its share, they are sampled
     evenly, so what shows is the whole of it played quickly rather than

@@ -207,13 +207,6 @@ class SetupScreen(unittest.TestCase):
         self.assertIn(gui.SetupPage.RULE_DIR, text)
         self.assertEqual(len(text.splitlines()), 3)
 
-    def test_a_snap_install_points_at_the_snap(self):
-        # $SNAP is read-only and mounted elsewhere, so the path printed
-        # has to be the one the running process can see.
-        from mk_k68_lightsmart import transport
-        with unittest.mock.patch.dict(os.environ, {"SNAP": "/snap/x/current"}):
-            self.assertTrue(transport.rule_source().startswith("/snap/x/current"))
-
     def test_the_commands_are_the_ones_the_cli_runs(self):
         from mk_k68_lightsmart import transport
         text = self.page.command_text()
@@ -338,18 +331,40 @@ class LightScreen(unittest.TestCase):
         self.assertEqual(chosen.name, "Close Backlight")
         self.assertEqual(chosen.mode, 0x00)
 
-    def test_apply_carries_the_mode_colour_and_parameters(self):
+    def test_apply_carries_mode_colour_random_flag_and_parameters(self):
         sent = []
         self.page.apply_requested.connect(lambda *args: sent.append(args))
         self.page.effects.setCurrentRow(6)          # Breath, 0x07
+        self.page.random_colour.setChecked(True)
         self.page.sliders["brightness"].setValue(12)
         self.page.sliders["speed"].setValue(3)
         self.page.sliders["direction"].setValue(1)
         self.page.apply()
-        self.assertEqual(sent, [(0x07, 0x102030, 12, 3, 1)])
+        self.assertEqual(sent, [(0x07, 0x102030, 1, 12, 3, 1)])
 
-    def test_the_note_admits_what_is_not_known(self):
-        # The parameter bytes are inferred; the screen should not imply
-        # otherwise by offering three confident sliders alone.
-        notes = [w.text() for w in self.page.findChildren(gui.QLabel)]
-        self.assertTrue(any("inferred" in text for text in notes))
+    def test_manual_colour_is_sent_when_random_is_off(self):
+        self.page._chosen_colour = gui.QColor("#abcdef")
+        sent = []
+        self.page.apply_requested.connect(lambda *args: sent.append(args))
+        self.page.effects.setCurrentRow(0)
+        self.page.apply()
+        self.assertEqual(sent[0][1:3], (0xABCDEF, 0))
+
+    def test_random_colour_disables_the_manual_colour_picker(self):
+        self.assertTrue(self.page.colour_button.isEnabled())
+        self.page.random_colour.setChecked(True)
+        self.assertFalse(self.page.colour_button.isEnabled())
+        self.assertEqual(self.page.colour_value.text(), "random")
+
+    def test_every_listed_mode_accepts_the_same_color_and_speed_controls(self):
+        from mk_k68_lightsmart import protocol
+        sent = []
+        self.page.apply_requested.connect(lambda *args: sent.append(args))
+        self.page.random_colour.setChecked(True)
+        self.page.sliders["speed"].setValue(14)
+        for row, effect in enumerate(protocol.EFFECTS):
+            self.page.effects.setCurrentRow(row)
+            self.page.apply()
+            self.assertEqual(sent[-1][0], effect.mode, effect.name)
+            self.assertEqual(sent[-1][2], 1, effect.name)
+            self.assertEqual(sent[-1][4], 14, effect.name)

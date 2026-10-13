@@ -25,12 +25,14 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetricsF,
     QLinearGradient,
     QPainter,
     QPen,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QFileDialog,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -141,6 +144,16 @@ class KeyboardView(QWidget):
         super().__init__(parent)
         self.colours: dict[int, QColor] = {}
         self.selected: kb_layout.Key | None = None
+        #: Light indices picked out as a group, drawn with a ring around
+        #: the keycap. The vendor's user and custom lighting screens both
+        #: select many keys at once -- "select all" takes the whole board
+        #: -- and then apply one colour or effect to the lot, so a single
+        #: ``selected`` key is not enough to show what an apply will hit.
+        self.chosen: set[int] = set()
+        #: Optional ``key -> str`` for the tooltip, which the remap screen
+        #: uses to show a key's default and current function the way the
+        #: vendor's hover panel does. Left unset, keys carry no tooltip.
+        self.hover_text = None
         w, _ = kb_layout.CANVAS_SIZE
         # Crop to what the keys actually occupy, with a small margin. The
         # strip is drawn separately above; a fixed crop used to cut the
@@ -160,6 +173,16 @@ class KeyboardView(QWidget):
         }
         self._font = QFont()
         self._font.setPointSizeF(7.5)
+        # A label wider than its keycap is drawn centred and clipped by
+        # the rect, which shows the middle of the word and reads as a
+        # glitch -- SWITCH is 18px wide and came out as "VITC". Elide
+        # instead, once, and let the tooltip carry the full name.
+        metrics = QFontMetricsF(self._font)
+        self._labels: dict[int, str] = {
+            k.light_index: metrics.elidedText(
+                k.name, Qt.ElideRight, self._rects[k.light_index].width() - 4)
+            for k in kb_layout.KEYS
+        }
 
     def key_at(self, pos: QPointF) -> kb_layout.Key | None:
         for key in kb_layout.KEYS:
@@ -196,14 +219,24 @@ class KeyboardView(QWidget):
                 p.setPen(QPen(edge, 1))
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4)
 
+            # The group ring sits outside the keycap rather than
+            # replacing its edge, so a chosen key still shows the colour
+            # it carries -- which is the point of picking it.
+            if key.light_index in self.chosen:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(ACCENT, 1.5))
+                p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
+
             p.setPen(label)
-            p.drawText(r, Qt.AlignCenter, key.name)
+            p.drawText(r, Qt.AlignCenter, self._labels[key.light_index])
 
     def mouseMoveEvent(self, event) -> None:
         hit = self.key_at(event.position())
         if hit is not self._hover:
             self._hover = hit
             self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor)
+            if self.hover_text is not None:
+                self.setToolTip(self.hover_text(hit) if hit else "")
             self.update()
 
     def leaveEvent(self, event) -> None:
@@ -257,6 +290,13 @@ class SidebarButton(QPushButton):
         f.setPointSizeF(6.5)
         p.setFont(f)
         p.drawText(QRectF(0, 26, self.width(), 18), Qt.AlignCenter, self.caption)
+
+
+def caption(text: str) -> QLabel:
+    """The small muted label that names the control under it."""
+    lb = QLabel(text)
+    lb.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+    return lb
 
 
 def primary_button(text: str, on_click) -> QPushButton:
@@ -450,9 +490,10 @@ class MatrixPage(QWidget):
         speed.addWidget(caption("Speed"))
         self.speed = QSlider(Qt.Horizontal)
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
-        # The rate the vendor's own designs assume, which is what the
-        # shipped effects were drawn at.
-        self.speed.setValue(matrix.NATIVE_SPEED)
+        # Faster than the rate the shipped effects were drawn at, by
+        # whatever PLAYBACK_BOOST says -- the same default the rest of
+        # the program sends.
+        self.speed.setValue(matrix.DEFAULT_PLAYBACK_SPEED)
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)
         speed.addWidget(self.speed)
@@ -581,10 +622,13 @@ class MatrixPage(QWidget):
     def _interval_ms(speed: int) -> int:
         """Preview pacing, from the same 1..100 the keyboard is sent.
 
-        This is the local preview only: how the firmware turns its speed
-        byte into a frame rate is not known, so the two need not agree.
+        The firmware's mapping is calibrated now, so the preview uses
+        it rather than a guess of its own and the label states what the
+        strip will actually do. The floor is the preview's own limit:
+        the top of the scale asks for 3 ms a frame, which no timer here
+        is going to hit.
         """
-        return max(20, 420 - 4 * speed)
+        return max(16, round(matrix.frame_ms(speed)))
 
     def toggle_play(self) -> None:
         if self._playing:
@@ -676,13 +720,14 @@ class MatrixPage(QWidget):
         stride = 1
         if peek.available > self.COMFORTABLE_FRAMES:
             suggested = -(-peek.available // self.COMFORTABLE_FRAMES)
+            minimum = -(-peek.available // matrix.MAX_FRAMES_ANIMATION)
             stride, ok = QInputDialog.getInt(
                 self, "Import an animation",
                 f"{peek.available} frames, {peek.size[0]}x{peek.size[1]}.\n"
                 f"The whole thing uploads in about "
                 f"{self._seconds_for(peek.available)} s.\n\n"
                 "Keep every nth frame:",
-                suggested, 1, peek.available,
+                suggested, minimum, peek.available,
             )
             if not ok:
                 return
@@ -699,6 +744,8 @@ class MatrixPage(QWidget):
         self._refresh_timeline()
         kept = (f"every {stride} of {loaded.available}" if stride > 1
                 else f"all {loaded.available}")
+        if loaded.truncated:
+            kept += f" (first {len(loaded.frames)} kept; keyboard limit)"
         self.status.emit(
             f"imported {len(self.frames)} frames ({kept}) — "
             f"about {self._seconds_for(len(self.frames))} s to upload"
@@ -758,18 +805,17 @@ class LightPage(QWidget):
     """The built-in lighting animations, with their parameters.
 
     The Home screen can fire one off; this is the screen for choosing
-    among them, and the only place the unknowns are stated: the mode
-    bytes are recovered and confirmed, but which of bytes 8-11 carries
-    brightness, speed and direction is still inferred, so the sliders
-    say so rather than pretending.
+    among them. Each mode uses the vendor's frame fields for random
+    colour, brightness, speed and direction.
     """
 
-    #: mode, colour, brightness, speed, direction
-    apply_requested = Signal(int, int, int, int, int)
+    #: mode, packed RGB, random-colour flag, brightness, speed, direction
+    apply_requested = Signal(int, int, int, int, int, int)
 
     def __init__(self, current_colour, parent: QWidget | None = None):
         super().__init__(parent)
         self._colour = current_colour
+        self._chosen_colour: QColor | None = None
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(20, 14, 20, 14)
@@ -817,6 +863,28 @@ class LightPage(QWidget):
         title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
         inner.addWidget(title)
 
+        self.random_colour = QCheckBox("Random color")
+        self.random_colour.setToolTip(
+            "Let the keyboard choose a different color for this effect")
+        self.random_colour.setStyleSheet(
+            "QCheckBox { color:#cfe3ff; font-size:11px; spacing:6px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }")
+        inner.addWidget(self.random_colour)
+
+        colour_row = QHBoxLayout()
+        colour_row.addWidget(caption("Color"))
+        self.colour_button = QPushButton("Choose color")
+        self.colour_button.setCursor(Qt.PointingHandCursor)
+        self.colour_button.setFixedWidth(112)
+        self.colour_button.clicked.connect(self.pick_colour)
+        colour_row.addWidget(self.colour_button)
+        self.colour_value = caption("")
+        colour_row.addWidget(self.colour_value)
+        colour_row.addStretch()
+        inner.addLayout(colour_row)
+        self.random_colour.toggled.connect(self._update_colour_controls)
+        self._update_colour_controls()
+
         self.sliders: dict[str, QSlider] = {}
         for name, label, default in (("brightness", "Brightness", 10),
                                      ("speed", "Speed", 8),
@@ -842,10 +910,8 @@ class LightPage(QWidget):
         inner.addLayout(row)
 
         note = QLabel(
-            "The mode bytes are the driver's own, confirmed on hardware. "
-            "Which of the frame's bytes 8-11 carries brightness, speed and "
-            "direction is still inferred — moving a slider may do nothing "
-            "until that is settled."
+            "The selected mode, color options, brightness and speed are "
+            "sent together when you apply the effect."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
@@ -859,11 +925,36 @@ class LightPage(QWidget):
             return protocol.EFFECTS[row]
         return protocol.EFFECTS[0]
 
+    def _effect_colour(self) -> QColor:
+        return QColor(self._chosen_colour or self._colour())
+
+    def _update_colour_controls(self, *_args) -> None:
+        colour = self._effect_colour()
+        self.colour_button.setEnabled(not self.random_colour.isChecked())
+        self.colour_button.setStyleSheet(
+            f"QPushButton {{ background:{colour.name()}; color:#ffffff; "
+            "border:1px solid #2a4a72; border-radius:3px; padding:4px; }"
+            "QPushButton:disabled { color:#6a7d96; }")
+        self.colour_value.setText(
+            "random" if self.random_colour.isChecked() else colour.name())
+
+    def refresh_colour(self) -> None:
+        """Refresh the preview after the shared Home color changes."""
+        self._update_colour_controls()
+
+    def pick_colour(self) -> None:
+        picked = QColorDialog.getColor(
+            self._effect_colour(), self, "Choose effect color")
+        if picked.isValid():
+            self._chosen_colour = picked
+            self._update_colour_controls()
+
     def apply(self) -> None:
-        colour = self._colour()
+        colour = self._effect_colour()
         self.apply_requested.emit(
             self.selected().mode,
             colour.red() << 16 | colour.green() << 8 | colour.blue(),
+            int(self.random_colour.isChecked()),
             self.sliders["brightness"].value(),
             self.sliders["speed"].value(),
             self.sliders["direction"].value(),
@@ -1011,8 +1102,9 @@ class MainWindow(QMainWindow):
     #: transfers from interleaving on the wire.
     request_open = Signal()
     request_key = Signal(int, int, int, int)
-    request_effect = Signal(int, int, int, int, int, int, int)
+    request_effect = Signal(int, int, int, int, int, int, int, int)
     request_upload = Signal(object)
+    request_keymap = Signal(object, bool)
 
     NAV = [
         ("⌂", "Home"),
@@ -1025,9 +1117,18 @@ class MainWindow(QMainWindow):
         ("░", "Matrix"),
     ]
 
+    #: The chrome around the pages, which the opening size has to add
+    #: back: the stack reports only what a page needs.
+    SIDEBAR_WIDTH = 50
+    TOPBAR_HEIGHT = 56
+    STATUSBAR_ALLOWANCE = 30
+    SCROLLBAR_ALLOWANCE = 16
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MK-K68-LightSmart")
+        # A starting point only; _open_at_a_size_that_fits has the last
+        # word once the pages exist and can be measured.
         self.resize(1268, 620)
         self.colour = QColor("#ff0000")
         # The keyboard is 140 ms per key and minutes per animation, so it
@@ -1035,6 +1136,7 @@ class MainWindow(QMainWindow):
         self.device = DeviceThread()
         self._connected = False
         self._uploading = False
+        self._close_after_upload = False
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -1044,6 +1146,13 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         outer.addWidget(self._build_topbar())
+
+        # Built before the screens rather than after them, although it
+        # sits at the bottom: a screen can report something while it is
+        # still being built, and a status sink that does not exist yet
+        # turns that into an exception inside a Qt slot, where it is
+        # printed and swallowed instead of failing loudly.
+        statusbar = self._build_statusbar()
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -1057,10 +1166,46 @@ class MainWindow(QMainWindow):
         self.matrix_page.upload_requested.connect(self.start_upload)
         self.matrix_page.cancel_requested.connect(self.cancel_upload)
         self.matrix_page.status.connect(self.set_status)
-        # The rail's sections, in its order; the ones with no screen yet
-        # get the placeholder.
-        built = {0: self._build_home(), 3: self.light_page,
-                 7: self.matrix_page}
+        # Imported here rather than at the top: the screens take this
+        # module's chrome, so they can only be loaded once it exists.
+        from . import screens
+
+        self.keys_page = screens.KeysPage()
+        self.keys_page.status.connect(self.set_status)
+        self.keys_page.write_requested.connect(self.request_keymap)
+
+        self.custom_page = screens.CustomPage(lambda: self.colour)
+        self.custom_page.status.connect(self.set_status)
+        self.custom_page.apply_key.connect(self.on_custom_key)
+        self.custom_page.scheme_changed.connect(self.on_scheme_changed)
+
+        self.macro_page = screens.MacroPage()
+        self.macro_page.status.connect(self.set_status)
+
+        self.profiles_page = screens.ProfilesPage()
+        self.profiles_page.status.connect(self.set_status)
+        # Switching a scheme is a replay, because the keyboard has no
+        # command for it. The screens themselves re-read the scheme
+        # when they next come up, so the only thing to do here is put
+        # it on the hardware.
+        self.profiles_page.replay_requested.connect(self.replay_scheme)
+        self.profiles_page.scheme_changed.connect(self.on_scheme_changed)
+        # The user-lighting screen paints keys like the custom one does,
+        # and the worker coalesces them per key either way.
+        self.profiles_page.apply_key.connect(self.on_custom_key)
+
+        self.music_page = screens.MusicPage()
+        self.music_page.status.connect(self.set_status)
+        # The same handler as the custom screen: both are painting
+        # keys, and the worker coalesces them per key either way.
+        self.music_page.apply_key.connect(self.on_custom_key)
+        self.music_page.scheme_changed.connect(self.on_scheme_changed)
+
+        # The rail's sections, in its order. Every one has a screen now.
+        built = {0: self._build_home(), 1: self.keys_page,
+                 2: self.macro_page, 3: self.light_page,
+                 4: self.profiles_page, 5: self.custom_page,
+                 6: self.music_page, 7: self.matrix_page}
         for index in range(len(self.NAV)):
             self.pages.addWidget(
                 built.get(index) or self._build_placeholder(index))
@@ -1068,14 +1213,68 @@ class MainWindow(QMainWindow):
         self.setup_page.look_again.connect(self.reconnect)
         self.setup_page.status.connect(self.set_status)
         self.pages.addWidget(self.setup_page)
-        body.addWidget(self.pages, 1)
+        # The pages scroll rather than being squeezed. A Qt layout given
+        # less height than it asks for does not refuse: it lays the next
+        # widget over the one before, which on the music screen put the
+        # "Levels" caption across the bottom row of keys. Which screen
+        # overflows depends on the window, and the window's own minimum
+        # follows whichever page is up, so pinning a height just moves
+        # the problem between screens. A viewport that scrolls ends it
+        # for all of them, at any window size.
+        scroller = QScrollArea()
+        scroller.setWidget(self.pages)
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.NoFrame)
+        scroller.setStyleSheet("QScrollArea { background: transparent; }")
+        # Both axes, because the stack holds every page at the widest
+        # page's minimum -- the custom screen's 1391px, scheme list and
+        # effect list and board and colour panel across -- and a window
+        # narrower than that would otherwise clip the right-hand edge
+        # with no way to reach it. Turning the bar off does not make the
+        # room; it only hides that the room is missing.
+        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body.addWidget(scroller, 1)
         outer.addLayout(body, 1)
 
-        outer.addWidget(self._build_statusbar())
+        outer.addWidget(statusbar)
+
+        self._open_at_a_size_that_fits()
 
         self._wire_device()
         self.set_status("looking for the keyboard…")
         self.device.start()
+
+    def _open_at_a_size_that_fits(self) -> None:
+        """Size the window to the rail's widest screen, within the display.
+
+        Before the pages scrolled, Qt refused any window smaller than
+        the widest one and silently grew it. Now that they scroll it
+        obeys, so a default narrower than the content would open with
+        bars already showing and nothing to tell the user why. Ask the
+        layout what it wants, and give it that much where the screen
+        allows -- where it does not, the scroll area is the answer.
+        """
+        # Asked of the window, the answer would be the scroll area's own
+        # modest hint: a thing that scrolls does not demand the size of
+        # what is inside it. Asked of the stack, it is whichever page
+        # happens to be up. So ask every page and take the largest, in
+        # each axis separately -- the widest screen and the tallest are
+        # not the same one.
+        pages = [self.pages.widget(i) for i in range(self.pages.count())]
+        hints = [p.sizeHint() for p in pages if p is not None]
+        width = max((h.width() for h in hints), default=1268)
+        height = max((h.height() for h in hints), default=620)
+        width += self.SIDEBAR_WIDTH + self.SCROLLBAR_ALLOWANCE
+        height += (self.TOPBAR_HEIGHT + self.STATUSBAR_ALLOWANCE
+                   + self.SCROLLBAR_ALLOWANCE)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            # A margin, so the window is not flush against the panels a
+            # desktop puts at the edges of its "available" area.
+            width = min(width, room.width() - 40)
+            height = min(height, room.height() - 60)
+        self.resize(max(width, 900), max(height, 560))
 
     # -- chrome ---------------------------------------------------------
     def _build_topbar(self) -> QWidget:
@@ -1116,7 +1315,7 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
-        side.setFixedWidth(50)
+        side.setFixedWidth(self.SIDEBAR_WIDTH)
         side.setStyleSheet(f"background: {SIDEBAR.name()};")
         lay = QVBoxLayout(side)
         lay.setContentsMargins(0, 6, 0, 10)
@@ -1239,6 +1438,11 @@ class MainWindow(QMainWindow):
         self.speed.setFixedWidth(110)
         lay.addWidget(self.speed)
 
+        self.random_effect = QCheckBox("Random color")
+        self.random_effect.setStyleSheet(
+            "QCheckBox { color:#9fb3d0; font-size:11px; spacing:4px; }")
+        lay.addWidget(self.random_effect)
+
         lay.addStretch()
 
         lay.addWidget(primary_button("Apply effect", self.apply_effect))
@@ -1299,10 +1503,15 @@ class MainWindow(QMainWindow):
     PENDING = {
         1: ("Key remapping",
             "The block is decoded: 694 bytes, four per key, and the slot "
-            "each key sits in. The encoder is written and tested.\n\n"
-            "Nothing writes it yet. A keymap survives a power cycle, and "
-            "the way back from a wrong one runs through the same untested "
-            "path — so the reset command has to be found first."),
+            "each key sits in. Of those, 576 are what actually go to the "
+            "keyboard.\n\n"
+            "The write works from the command line — 'remap --set "
+            "Caps=0xe0', and 'remap --defaults' to put it back. The "
+            "reset turned out not to be a command at all: the vendor's "
+            "own reset writes that same default map, so the way back is "
+            "the write.\n\n"
+            "What is missing here is the screen: a keyboard to click and "
+            "a key to pick for each one."),
         2: ("Macros",
             "The command and its framing are known (0x15, sent in 64-byte "
             "blocks). The event encoding is not: a key press emits a 0x50 "
@@ -1366,6 +1575,7 @@ class MainWindow(QMainWindow):
         if picked.isValid():
             self.colour = picked
             self._paint_swatch()
+            self.light_page.refresh_colour()
 
     # -- the device, which lives on the worker thread --------------------
     def _wire_device(self) -> None:
@@ -1383,6 +1593,7 @@ class MainWindow(QMainWindow):
         self.request_key.connect(w.set_key_colour)
         self.request_effect.connect(w.set_effect)
         self.request_upload.connect(w.upload)
+        self.request_keymap.connect(w.write_keymap)
 
     def reconnect(self) -> None:
         self.set_status("looking for the keyboard…")
@@ -1415,11 +1626,21 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        if self._uploading:
+            self._close_after_upload = True
+            # Stop producers before waiting for the device worker. They
+            # otherwise keep queuing colour writes behind a long upload.
+            self.custom_page._stop()
+            self.music_page._stop()
+            self.cancel_upload()
+            self.set_status(
+                "finishing the keyboard transfer before closing…")
+            event.ignore()
+            return
         self.matrix_page.stop()
-        # Cancels any upload, then joins the thread, so the descriptor is
-        # closed by the thread that opened it.
-        if not self.device.stop():
-            print("device thread would not stop; terminated it", file=sys.stderr)
+        # The transfer is complete (or there was none), so the descriptor
+        # can be closed by the thread that opened it.
+        self.device.stop()
         super().closeEvent(event)
 
     def set_status(self, text: str, ok: bool | None = None) -> None:
@@ -1436,6 +1657,54 @@ class MainWindow(QMainWindow):
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_key.emit(key.light_index, *rgb)
+
+    def on_scheme_changed(self, scheme) -> None:
+        """Say which scheme is in use now.
+
+        Nothing else is needed: each screen re-reads the scheme when it
+        next comes up, so they cannot show another one's work, and
+        putting it on the keyboard is a separate ask -- the profiles
+        screen decides whether a switch replays, because half of a
+        replay is a persistent write.
+        """
+        self.set_status(f"scheme: {scheme.name}")
+
+    def replay_scheme(self, write_keymap: bool = True) -> None:
+        """Put the active scheme back on the keyboard.
+
+        A scheme is a host-side bundle because the keyboard has no
+        command to switch one — the vendor's own driver sends it
+        nothing when a scheme changes and re-sends the contents instead
+        (docs/PROTOCOL.md §10). So "switching" means exactly this:
+        the keymap as one block, then the painted layout a key at a
+        time.
+
+        ``write_keymap`` is separate because the two halves differ in
+        how much they cost to be wrong. The lighting is gone at the
+        next effect; the keymap outlives the power cycle. A caller that
+        has not asked anybody should pass False.
+        """
+        from . import store as scheme_store
+
+        scheme = scheme_store.shared().current
+        changes = scheme.remap_changes()
+        if write_keymap and changes:
+            self.request_keymap.emit(protocol.remap_block(changes), False)
+        for index, rgb in scheme.lighting.items():
+            self.request_key.emit(
+                index, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF)
+        self.set_status(
+            f"{scheme.name}: {len(changes)} remapped, "
+            f"{len(scheme.lighting)} lit")
+
+    def on_custom_key(self, light_index: int, colour: QColor) -> None:
+        """Send one key of a painted layout.
+
+        The worker coalesces these by key, so sending a whole board at
+        once costs one request per key rather than one per repaint.
+        """
+        self.request_key.emit(
+            light_index, colour.red(), colour.green(), colour.blue())
 
     def on_key_applied(self, light_index: int, rgb: int) -> None:
         """Paint a key only once the keyboard has taken its colour."""
@@ -1473,6 +1742,7 @@ class MainWindow(QMainWindow):
             self.set_status(f"nothing to upload: {exc}", ok=False)
             return
         self._set_uploading(True)
+        self.device.worker.prepare_upload()
         self.on_progress(0, blocks)
         self.set_status(
             f"uploading {len(animation.frames)} frame(s), {blocks} blocks…"
@@ -1508,31 +1778,36 @@ class MainWindow(QMainWindow):
         # The worker has already said what happened; this only hands the
         # controls back.
         self._set_uploading(False)
+        if self._close_after_upload:
+            self.close()
 
     def apply_effect(self) -> None:
         mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
-            mode, rgb, p9=self.brightness.value(), p10=self.speed.value()
+            mode, rgb, p8=int(self.random_effect.isChecked()),
+            p9=self.brightness.value(), p10=self.speed.value()
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_effect.emit(
-            mode, *rgb, self.brightness.value(), self.speed.value(), 0
+            mode, *rgb, int(self.random_effect.isChecked()),
+            self.brightness.value(), self.speed.value(), 0
         )
 
-    def apply_light(self, mode: int, rgb: int, brightness: int, speed: int,
-                    direction: int) -> None:
+    def apply_light(self, mode: int, rgb: int, random_colour: int,
+                    brightness: int, speed: int, direction: int) -> None:
         """The Light screen's own request, which carries a direction."""
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{b:02X}" for b in protocol.data_frame(
                 mode, ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF),
-                p9=brightness, p10=speed, p11=direction)[:16]
+                p8=random_colour, p9=brightness, p10=speed,
+                p11=direction)[:16]
         ))
         self.set_status(f"applying {name.name if name else f'{mode:#04x}'}…")
         self.request_effect.emit(
             mode, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF,
-            brightness, speed, direction,
+            random_colour, brightness, speed, direction,
         )
 
 

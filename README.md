@@ -1,4 +1,9 @@
-# MK-K68-LightSmart
+# MK-K68-LightSmart — uso local no Linux
+
+Projeto privado, mantido e executado neste computador Linux. Não há
+pacote de publicação nem suporte planejado para outros sistemas. O código
+fica versionado no Git local para registrar alterações e permitir voltar
+a versões anteriores.
 
 Linux control panel for 68-key mechanical keyboards that carry a **65×5
 dot-matrix LED strip** above the function row — the hardware whose vendor
@@ -39,8 +44,16 @@ first two; all configuration goes through the third:
 ## Status
 
 The transport is complete, and both lighting paths are confirmed on
-real hardware: per-key colour, and the dot-matrix upload. Two of the
-app's nine screens are built.
+real hardware: per-key colour, and the dot-matrix upload. Every section
+of the rail now opens on a screen rather than a placeholder, but they
+do not all reach the keyboard — three of them edit state the protocol
+cannot yet carry, and each says so on its face.
+
+Each screen is modelled on the vendor's own, section by section, from
+the handbook that ships with the Windows driver: the same regions, the
+same controls, in the same order. Where this app's protocol knowledge
+falls short of the vendor's, the control is still there and the screen
+says what it cannot do rather than leaving the section out.
 
 | Area | State |
 |---|---|
@@ -52,15 +65,68 @@ app's nine screens are built.
 | Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
-| Key remapping | 🔍 slots and envelope decoded, records partly; nothing written to the keyboard yet |
-| Macros | 🔍 opcodes located, event encoding not decoded |
-| Music-reactive, settings screens | ⬜ not started |
+| Key remapping | ✅ the vendor's three regions: hover panel, right-click custom-function dialog over its five key types, and the quick-select grid. Writes, with the vendor's own default map as the way back; not yet confirmed on hardware |
+| User lighting | ✅ the vendor's User Light screen: scheme list, select-all / numbers / WASD, colour wheel with its fourteen presets, apply and reset. Confirmed on hardware |
+| Custom lighting | ✅ the vendor's Custom Light screen: an effect per picked key, with colour and animation speed. No command puts an effect on part of the board, so it is played from the host and the screen says so |
+| Music-reactive | ✅ the vendor's four knobs — visualisation mode, amplitude, background mode, background brightness. Records what is playing (`pw-record`, falling back to `parec`); degrades to a stand-in meter where neither exists |
+| Macros | 🔍 the vendor's four regions, including mouse buttons and the wheel, insert-before/after, copy-paste between schemes and the three delay policies. The send is disabled: an event on the wire is a `0x50` marker and two undecoded bytes |
 
 ---
 
-## Install
+## Preparar neste Ubuntu
 
-### 1. udev rule
+Este checkout foi ajustado para o Ubuntu 26.04 deste computador. O
+protocolo depende de `fcntl` e do dispositivo `/dev/hidraw`; não funciona
+no Windows ou macOS.
+
+Instale as dependências do sistema:
+
+```sh
+sudo apt install python3 python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore
+```
+
+O medidor de música usa PipeWire. Neste Linux ele está disponível por
+`pw-record` (pacote `pipewire-bin`); sem captura de áudio, a tela usa um
+medidor de demonstração.
+
+Execute direto do checkout, sem publicar ou gerar pacote:
+
+```sh
+./mk-k68-lightsmart-gui
+./mk-k68-lightsmart --version
+./mk-k68-lightsmart info
+```
+
+Para abrir pelo menu de aplicativos, instale o atalho deste checkout na
+sua conta:
+
+```sh
+mkdir -p ~/.local/share/applications
+cp desktop/mk-k68-lightsmart.desktop ~/.local/share/applications/mk-k68-lightsmart_gui.desktop
+update-desktop-database ~/.local/share/applications
+```
+
+Esse atalho local substitui o atalho antigo do Snap no menu e abre esta
+cópia do projeto.
+
+### Manter as versões no Git
+
+As mudanças permanecem na branch local atual. Para conferir o histórico e
+salvar um marco local:
+
+```sh
+git status
+git add -A
+git commit -m "Melhora o controle local do teclado"
+git tag v0.1.0-local
+```
+
+Não use `git push` para manter este projeto somente neste computador.
+
+## Acesso ao teclado
+
+Instale a regra udev para liberar somente a interface de configuração do
+teclado para sua sessão, sem expor as interfaces de digitação:
 
 Without it the tool needs root.
 
@@ -90,21 +156,6 @@ for n in /dev/hidraw*; do printf '%s ' "$n"; getfacl -p "$n" | grep -c "^user:$U
 ```
 
 Only the vendor interface should report `1`.
-
-### 2. Dependencies
-
-```sh
-sudo apt install python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore
-```
-
-Python 3.10 or newer. Nothing else — the transport is plain `fcntl.ioctl`.
-
-### 3. Run
-
-```sh
-./mk-k68-lightsmart-gui     # the desktop app
-./mk-k68-lightsmart info    # the CLI
-```
 
 ---
 
@@ -141,9 +192,10 @@ one is the picture you paint on, and the whole list goes to the keyboard
 as one animation — up to the firmware's 941.
 
 - **Add**, **Duplicate**, **Delete**, **Clear this frame**.
-- **Play** previews the animation in the window. The pacing is local:
-  how the firmware turns its speed byte into a frame rate is not known
-  yet, so the preview is an approximation, not a simulation.
+- **Play** previews the animation in the window, at the frame rate the
+  speed slider will give the keyboard — the firmware's mapping is
+  calibrated, so the label says what the strip will do. Only the top of
+  the slider parts company with it, where the preview floors at 16 ms.
 - **Upload animation** streams the whole thing, with the same progress
   bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
   seconds.
@@ -167,6 +219,10 @@ Useful for protocol work, since it sends one packet at a time.
 # light one key
 ./mk-k68-lightsmart key Esc FF0000
 
+# free a keyboard that stopped answering, which is what an upload
+# interrupted partway leaves behind. The app does this by itself.
+./mk-k68-lightsmart unstick
+
 # list the built-in animations and the mode byte each one uses
 ./mk-k68-lightsmart effects
 
@@ -177,6 +233,11 @@ Useful for protocol work, since it sends one packet at a time.
 ./mk-k68-lightsmart strip test
 ./mk-k68-lightsmart strip fill 00FF00 --brightness 40
 ./mk-k68-lightsmart strip clear
+
+# remap a key, and put the vendor's own default map back. This one
+# persists across a power cycle, so it asks before it writes.
+./mk-k68-lightsmart remap --set Caps=0xe0 --dry-run
+./mk-k68-lightsmart remap --defaults
 
 # walk the effect modes, recording what each one does
 ./mk-k68-lightsmart effect-scan
@@ -275,32 +336,6 @@ The vendor installer is Inno Setup; inside it, `DeviceDriver.exe` is a
 
 Every protocol claim in `docs/PROTOCOL.md` cites the address it came
 from, so it can be re-checked.
-
----
-
-## Packaging
-
-See [docs/PACKAGING.md](docs/PACKAGING.md) for the full reasoning.
-
-The short version: on a classic desktop **no snap interface grants
-`/dev/hidraw` access**. snapd's `hidraw` interface is only slotted by
-gadget snaps, i.e. Ubuntu Core:
-
-```
-$ snap interface hidraw
-name:          hidraw
-summary:       allows access to specific hidraw device
-documentation: https://snapcraft.io/docs/hidraw-interface
-          <- no "slots:" section: nothing on this system provides one
-
-$ snap interfaces | grep -c hidraw
-0
-```
-
-So the snap is built **classic**, which needs manual store review. The
-alternatives — `raw-usb` with libusb (needs detaching the kernel driver
-on every operation) and the `custom-device` interface (still a store
-review) — are written up with their trade-offs.
 
 ---
 

@@ -167,7 +167,9 @@ The driver never sends a data frame bare:
 
 ### Built-in animation — `fcn.00430580`
 
-**verified** framing and mode bytes, **inferred** parameter meanings.
+**verified** framing, mode bytes and the settings-record-to-frame field
+copies; the meaning and range of the numeric settings are inferred from
+the vendor UI labels and still need hardware confirmation.
 
 Confirmed on hardware on 2026-10-11 at both ends of the table: `0x00`
 turns the key backlight off, and `0x07` breathes in the colour it is
@@ -205,7 +207,8 @@ without a list entry, so something uses it; what, is not known.
 
 Byte 0 is the effect mode, taken from the app's current-mode field
 (`[esi+0x814]`). Bytes 1-3 and 8-11 are copied out of a 20-byte
-per-effect settings record:
+per-effect settings record. The UI exposes the settings in the same
+order: random colour, RGB colour, brightness, speed and direction.
 
 | frame byte | record offset |
 |---|---|
@@ -215,10 +218,12 @@ per-effect settings record:
 | 10 | 19 |
 | 11 | 17 |
 
-The UI exposes exactly four knobs for an effect — random colour,
-brightness, speed and direction (strings 260-263 and 284) — which is
-almost certainly what bytes 8-11 carry, but the mapping is not yet
-confirmed.
+The implementation maps byte 8 to the random-colour checkbox and bytes
+9-11 to brightness, speed and direction, matching the vendor's controls.
+Random colour sends 0 or 1; the numeric controls send their selected
+0-15 values. These settings are sent for every listed mode. Modes may
+ignore settings they do not use (for example, Close Backlight is an off
+switch); firmware behavior still needs confirmation on the keyboard.
 
 The effect names come from the driver's English string table, ids
 200-221:
@@ -446,9 +451,15 @@ decides the shape:
 Usages `0xF1`-`0xF3` and `0xD3` take their own branches (`0x4172B1`),
 writing the original key's usage into byte 2 and the special id into
 byte 3. Bytes 1 and 2 of an ordinary remap come out of `fcn.004588A0`,
-which is not decoded yet — so **nothing here writes a keymap to the
-keyboard**. A keymap is persistent, and a wrong one types the wrong
-letters until it is corrected.
+which is decoded — a switch on `usage - 0xE0` over eight arms, so a
+modifier becomes its bit.
+
+A keymap is persistent: a wrong one types the wrong letters until
+something writes a right one. That used to be the reason nothing here
+sent one. It no longer is — the vendor's own reset writes the default
+block through this same command, so the way back exists and is in
+`remap_defaults()`; see §10. `Keyboard.write_keymap()` sends a block,
+and the `remap` command asks before it does.
 
 ## 8. Macros
 
@@ -469,8 +480,7 @@ not decoded yet.
 
 1. ~~Numeric ids for the lighting effects~~ — recovered from the
    driver's own list population; see §5. What `0x14` is remains open.
-2. Which of bytes 8-11 is brightness, speed, direction and
-   random-colour, and their ranges.
+2. Confirm parameter ranges and effect-specific behavior on hardware.
 3. ~~The rest of the remap record~~ — the ordinary case is decoded,
    `fcn.004588A0` included; see §7. What remains is the action types
    beyond a plain key: the three-parameter `0x0D`, and the macro
@@ -493,11 +503,108 @@ not decoded yet.
    | `0x15` | 1 | macro |
    | `0x17` `0x19` `0x23` `0x61` `0xF5` | 1 each | — |
 
-   One of the unknown five is almost certainly the reset: the vendor UI
-   offers "Reset Keyboard Data" and "Restore Factory Settings" (strings
-   410 and 411), so the firmware has the command. Finding it is the
-   first step towards a key-remap screen, because it is the way back
-   from a keymap written wrong.
+   ~~One of the unknown five is almost certainly the reset~~ — it is
+   none of them. There is no reset command; see §10. Of the five,
+   `0x17` and `0x23` are reached from the dialog's idle tick
+   (`method.KeyboardDlg.virtual_0` cases 7 and 6), `0x19` sits in the
+   macro builder beside `0x15`, and `0x20` and `0x61` are still open.
+
+## 10. The reset, which is not a command
+
+The vendor UI offers "Reset Keyboard Data" (string 410, confirmed by
+80/81) and "Restore Factory Settings" (411, confirmed by 82/83), so the
+search was for a reset opcode. There isn't one. The chain, read end to
+end:
+
+```
+"Reset Keyboard Data"
+  → fcn.004378F0        confirm with strings 81/80, cancel returns 0
+  → queue op 4          appended at [this+0x7F0], count at [this+0x7F4]
+  → Sleep(500)
+  → method.KeyboardDlg.virtual_0, case 4   (0x43A856; the queue reads
+                                            as [this+0x544]/[+0x548],
+                                            the same fields less 0x2AC)
+  → fcn.00416F20        04 18, then 04 11 with byte 8 = 9, then the
+                        block, then 04 02, 04 F0
+  → fcn.00417710        the same again through 04 27
+```
+
+So the reset *is* the keymap write: the default block through `0x11`,
+and the same through `0x27` for the Fn layer. Both commands were
+already decoded, and `remap_block()` with no changes already produces
+that block — every key carrying the `05 03 00 00` "left as it is"
+record. `protocol.remap_defaults()` names it, and `remap --defaults`
+sends it.
+
+This removes the blocker on a key-remap screen. The way back from a
+keymap written wrong is not an undiscovered command; it is this.
+
+### The queue, and what a reset really touches
+
+The dialog does not send commands from its handlers. It appends an
+operation code to a list and lets its idle tick drain it. The handler
+writes `[this+0x7F0]` with the count at `[this+0x7F4]`; the tick reads
+`[this+0x544]` and `[this+0x548]`, which are the same two fields —
+`0x7F0 - 0x2AC = 0x544`, and the tick holds the object 0x2AC lower.
+
+| op | handler | what it sends |
+|---|---|---|
+| 1 | `fcn.00415590` | nothing |
+| 2 | `fcn.0043A9D0` | nothing |
+| 3 | `fcn.004158E0` | nothing — a list-box selection and a UI refresh |
+| 4 | `fcn.00416F20` + `fcn.00417710` | keymap `0x11`, Fn layer `0x27` |
+| 5 | `fcn.00430580` | `0x13` |
+| 6 | `fcn.00430710` | `0x23` |
+| 7 | `fcn.00439F00` | `0x17` |
+| 8 | `fcn.00429C20` | boot animation `0x31` |
+
+"Reset Keyboard Data" queues 4 alone. **"Restore Factory Settings"
+queues 3, 4 and 6**, in that order (`0x437EAA`, `0x437EE9`, `0x437F31`)
+— so the wider reset is the keymap and the Fn layer plus whatever
+`0x23` restores, and nothing else.
+
+That cases 1-3 send nothing is read off a complete census, not an
+absence of evidence: every control write in the binary is one of 56
+`mov word [...], (sub<<8)|4` stores, and none falls inside those three
+functions. Fifty-five use `[ebp+disp8]`; the fifty-sixth is below.
+
+### `0xF5` reads a block back
+
+`0x430BB0` is the one control write in the `[ebp+disp32]` form, which
+is why a `/x 66c745..04..` sweep misses it:
+
+```
+0x430BA8  memset(buf, 0, 599)
+0x430BB0  mov word  [buf], 0xF504      ; the bytes 04 F5
+0x430BBF  mov byte  [buf+8], 9         ; the same selector the keymap write uses
+0x430BCE  call fcn.00456400            ; returns a bool, which is tested
+```
+
+`fcn.00456400` is not one of the three senders. It sends and then
+reads: `fcn.00457400` calls `DeviceIoControl` with
+**`0xB0192` = IOCTL_HID_GET_FEATURE** (`0x457437`), under a timeout.
+So `04 F5` asks the keyboard for a block, and byte 8 picks which — 9,
+the same number the `0x11` write uses for the keymap.
+
+It is driven from the idle tick (`0x43A95A`), outside the case switch,
+so it is a poll rather than a user action. The response layout is not
+decoded; what is established is the direction. This is the piece that
+would make a remap screen verifiable — read the map back instead of
+trusting that the write landed.
+
+### What actually goes out
+
+The announce carries no block count — unlike the animation, the
+firmware knows a keymap's size. The driver passes its sender all 694
+bytes (`0x4171DC`) but that sender, `fcn.00455E50`, transmits
+`(len >> 6) - 1` reports of 64 (`0x455FF1`): **576 bytes, 9 reports**,
+and the last 118 never leave the host.
+
+576 is not an accident. It is the byte after the `AA 55` that sits at
+574, which is what made the magic look misplaced — it is at the end of
+what is *sent*, not of the struct. Note that `fcn.00455E50` is not the
+animation's sender; that is `fcn.004561C0` (§6), which applies
+`(len >> 6) + 1` instead. Three senders, three lengths.
 
 What is left is quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.

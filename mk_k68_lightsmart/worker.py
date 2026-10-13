@@ -24,7 +24,12 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from . import protocol
 from .matrix import Animation
-from .transport import DeviceGone, DeviceNotFound, TransportError
+from .transport import (
+    ACK_STUCK,
+    DeviceGone,
+    DeviceNotFound,
+    TransportError,
+)
 
 
 class Cancelled(Exception):
@@ -65,6 +70,11 @@ class DeviceWorker(QObject):
         # so only the latest value per key is kept.
         self._pending: dict[int, tuple[int, int, int]] = {}
         self._lock = threading.Lock()
+        self._upload_lock = threading.Lock()
+        self._upload_prepared = False
+        # Guards _unstuck against recursing: freeing the keyboard runs
+        # commands of its own, and those go through the same guard.
+        self._recovering = False
 
     # -- lifecycle ------------------------------------------------------
     @Slot()
@@ -89,6 +99,17 @@ class DeviceWorker(QObject):
         """Ask an upload to stop. Safe to call from any thread."""
         self._cancel.set()
 
+    def prepare_upload(self) -> None:
+        """Reset cancellation before a queued upload is handed to Qt.
+
+        The window can be closed after it queues the upload but before
+        this worker begins processing it. Preparing here ensures that a
+        cancellation in that interval is not erased at slot entry.
+        """
+        with self._upload_lock:
+            self._cancel.clear()
+            self._upload_prepared = True
+
     # -- operations -----------------------------------------------------
     def _guard(self, what: str, fn) -> bool:
         if self.kb is None:
@@ -101,10 +122,61 @@ class DeviceWorker(QObject):
             self.disconnected.emit(str(exc))
             return False
         except (TransportError, ValueError) as exc:
+            if self._unstuck(exc):
+                return self._guard(what, fn)
             self.status.emit(f"{what} failed: {exc}", False)
             return False
         self.status.emit(f"{what} sent", True)
         return True
+
+    def _unstuck(self, exc: Exception) -> bool:
+        """Free a keyboard still waiting for an interrupted upload.
+
+        An upload that stopped early leaves the firmware reading every
+        report as pixels and answering 0x00 to all of them, so the next
+        command fails and so does every one after it -- the whole app
+        goes dead with nothing but a rejection to show for it, which
+        reads as "the keyboard stopped working" rather than as the one
+        recoverable thing it is. Recognise it, make up the outstanding
+        blocks, and let the caller try again.
+
+        Only once: ``_recovering`` keeps a keyboard that is stuck for
+        some other reason from recursing through here forever.
+        """
+        if self._recovering or self.kb is None:
+            return False
+        if not isinstance(exc, TransportError):
+            return False
+        if f"{ACK_STUCK:#04x}" not in str(exc):
+            return False
+        self._recovering = True
+        try:
+            if not self.kb.stuck():
+                return False
+            self.status.emit(
+                "the keyboard is still waiting for an upload that stopped "
+                "early — finishing it off…", False)
+            fed = self.kb.unstick()
+            self.status.emit(
+                f"keyboard freed after {fed} leftover block(s)", True)
+            return True
+        except (TransportError, ValueError, OSError):
+            return False
+        finally:
+            self._recovering = False
+
+    @Slot(object, bool)
+    def write_keymap(self, block: bytes, fn_layer: bool) -> None:
+        """Make ``block`` the keyboard's map.
+
+        Unlike every other request here this one outlives the process,
+        so the screen asks before it sends and the guard reports the
+        result either way rather than failing quietly.
+        """
+        self._guard(
+            "keymap",
+            lambda: self.kb.write_keymap(block, fn_layer=fn_layer),
+        )
 
     @Slot(int, int, int, int)
     def set_key_colour(self, light_index: int, r: int, g: int, b: int) -> None:
@@ -136,26 +208,30 @@ class DeviceWorker(QObject):
             # never show a colour the keyboard refused.
             self.key_applied.emit(index, rgb[0] << 16 | rgb[1] << 8 | rgb[2])
 
-    @Slot(int, int, int, int, int, int, int)
+    @Slot(int, int, int, int, int, int, int, int)
     def set_effect(self, mode: int, r: int, g: int, b: int,
-                   brightness: int, speed: int, direction: int = 0) -> None:
+                   random_colour: int, brightness: int, speed: int,
+                   direction: int = 0) -> None:
         self._guard(
             f"effect {mode:#04x}",
             lambda: self.kb.set_effect(
-                mode, (r, g, b), brightness=brightness, speed=speed,
-                direction=direction
+                mode, (r, g, b), random_colour=random_colour,
+                brightness=brightness, speed=speed, direction=direction
             ),
         )
 
     @Slot(object)
     def upload(self, animation: Animation) -> None:
         """Push an animation to the strip, reporting progress."""
+        with self._upload_lock:
+            if not self._upload_prepared:
+                # Also supports direct callers and consecutive uploads.
+                self._cancel.clear()
+            self._upload_prepared = False
         if self.kb is None:
             self.disconnected.emit("no keyboard")
             self.upload_finished.emit(False)
             return
-
-        self._cancel.clear()
         last = 0
         at_stop = {"sent": 0, "total": 0}
 
@@ -217,12 +293,14 @@ class DeviceThread:
     def start(self) -> None:
         self.thread.start()
 
-    def stop(self, timeout_ms: int = 5000) -> bool:
-        """Cancel any upload, then stop the thread and wait for it."""
+    def stop(self) -> None:
+        """Stop the worker after its current operation has finished.
+
+        Terminating a QThread while it is inside an ioctl can leave both
+        the descriptor and the keyboard's upload transaction unfinished.
+        The window defers closing during an upload, so this join is short
+        and always lets ``worker.close`` run on the owning thread.
+        """
         self.worker.cancel()
         self.thread.quit()
-        if not self.thread.wait(timeout_ms):
-            self.thread.terminate()
-            self.thread.wait(1000)
-            return False
-        return True
+        self.thread.wait()
