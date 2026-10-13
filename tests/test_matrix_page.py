@@ -309,3 +309,42 @@ class ImportingAPicture(unittest.TestCase):
     def test_the_time_estimate_matches_the_payload(self):
         blocks = matrix.Animation(frames=[matrix.Frame()] * 10).block_count()
         self.assertEqual(self.page._seconds_for(10), round(blocks * 0.015))
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class LightScreen(unittest.TestCase):
+    """The screen that picks a built-in animation."""
+
+    def setUp(self) -> None:
+        from PySide6.QtGui import QColor
+        self.page = gui.LightPage(lambda: QColor("#102030"))
+
+    def test_it_lists_every_effect_the_driver_has(self):
+        from mk_k68_lightsmart import protocol
+        self.assertEqual(self.page.effects.count(), len(protocol.EFFECTS))
+        # The mode is shown, since it is the thing the protocol uses.
+        self.assertIn("0x00", self.page.effects.item(
+            len(protocol.EFFECTS) - 1).text())
+
+    def test_the_selection_is_the_effect_not_the_row(self):
+        from mk_k68_lightsmart import protocol
+        self.page.effects.setCurrentRow(len(protocol.EFFECTS) - 1)
+        chosen = self.page.selected()
+        self.assertEqual(chosen.name, "Close Backlight")
+        self.assertEqual(chosen.mode, 0x00)
+
+    def test_apply_carries_the_mode_colour_and_parameters(self):
+        sent = []
+        self.page.apply_requested.connect(lambda *args: sent.append(args))
+        self.page.effects.setCurrentRow(6)          # Breath, 0x07
+        self.page.sliders["brightness"].setValue(12)
+        self.page.sliders["speed"].setValue(3)
+        self.page.sliders["direction"].setValue(1)
+        self.page.apply()
+        self.assertEqual(sent, [(0x07, 0x102030, 12, 3, 1)])
+
+    def test_the_note_admits_what_is_not_known(self):
+        # The parameter bytes are inferred; the screen should not imply
+        # otherwise by offering three confident sliders alone.
+        notes = [w.text() for w in self.page.findChildren(gui.QLabel)]
+        self.assertTrue(any("inferred" in text for text in notes))

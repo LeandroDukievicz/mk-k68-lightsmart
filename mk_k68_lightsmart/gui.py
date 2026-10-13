@@ -744,6 +744,122 @@ class MatrixPage(QWidget):
         self.status.emit(f"imported {name} — {len(self.frames)} frames")
 
 
+class LightPage(QWidget):
+    """The built-in lighting animations, with their parameters.
+
+    The Home screen can fire one off; this is the screen for choosing
+    among them, and the only place the unknowns are stated: the mode
+    bytes are recovered and confirmed, but which of bytes 8-11 carries
+    brightness, speed and direction is still inferred, so the sliders
+    say so rather than pretending.
+    """
+
+    #: mode, colour, brightness, speed, direction
+    apply_requested = Signal(int, int, int, int, int)
+
+    def __init__(self, current_colour, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._colour = current_colour
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(12)
+        lay.addWidget(self._build_list())
+        lay.addWidget(self._build_controls(), 1)
+
+    def _build_list(self) -> QWidget:
+        card = Card()
+        card.setFixedWidth(210)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(12, 10, 12, 10)
+        inner.setSpacing(8)
+
+        title = QLabel("Animations")
+        title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
+        inner.addWidget(title)
+
+        self.effects = QListWidget()
+        self.effects.setStyleSheet(
+            "QListWidget { background:#061a33; color:#9fb3d0; border:1px solid"
+            " #0d3a6b; border-radius:3px; font-size:11px; }"
+            "QListWidget::item { padding:4px 6px; }"
+            "QListWidget::item:selected { background:#0a3568; color:#cfe3ff; }"
+        )
+        for effect in protocol.EFFECTS:
+            self.effects.addItem(f"{effect.mode:#04x}  {effect.name}")
+        self.effects.setCurrentRow(0)
+        self.effects.itemDoubleClicked.connect(lambda _: self.apply())
+        inner.addWidget(self.effects, 1)
+        return card
+
+    def _build_controls(self) -> QWidget:
+        card = Card()
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(16, 12, 16, 12)
+        inner.setSpacing(10)
+
+        def caption(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+            return label
+
+        title = QLabel("Parameters")
+        title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
+        inner.addWidget(title)
+
+        self.sliders: dict[str, QSlider] = {}
+        for name, label, default in (("brightness", "Brightness", 10),
+                                     ("speed", "Speed", 8),
+                                     ("direction", "Direction", 0)):
+            row = QHBoxLayout()
+            row.addWidget(caption(label))
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 15)
+            slider.setValue(default)
+            slider.setFixedWidth(170)
+            row.addWidget(slider)
+            value = caption(str(default))
+            slider.valueChanged.connect(
+                lambda v, lb=value: lb.setText(str(v)))
+            row.addWidget(value)
+            row.addStretch()
+            inner.addLayout(row)
+            self.sliders[name] = slider
+
+        row = QHBoxLayout()
+        row.addWidget(primary_button("Apply", self.apply))
+        row.addStretch()
+        inner.addLayout(row)
+
+        note = QLabel(
+            "The mode bytes are the driver's own, confirmed on hardware. "
+            "Which of the frame's bytes 8-11 carries brightness, speed and "
+            "direction is still inferred — moving a slider may do nothing "
+            "until that is settled."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
+        inner.addWidget(note)
+        inner.addStretch()
+        return card
+
+    def selected(self):
+        row = self.effects.currentRow()
+        if 0 <= row < len(protocol.EFFECTS):
+            return protocol.EFFECTS[row]
+        return protocol.EFFECTS[0]
+
+    def apply(self) -> None:
+        colour = self._colour()
+        self.apply_requested.emit(
+            self.selected().mode,
+            colour.red() << 16 | colour.green() << 8 | colour.blue(),
+            self.sliders["brightness"].value(),
+            self.sliders["speed"].value(),
+            self.sliders["direction"].value(),
+        )
+
+
 class SetupPage(QWidget):
     """Why the keyboard is, or is not, reachable.
 
@@ -853,7 +969,7 @@ class MainWindow(QMainWindow):
     #: transfers from interleaving on the wire.
     request_open = Signal()
     request_key = Signal(int, int, int, int)
-    request_effect = Signal(int, int, int, int, int, int)
+    request_effect = Signal(int, int, int, int, int, int, int)
     request_upload = Signal(object)
 
     NAV = [
@@ -893,16 +1009,18 @@ class MainWindow(QMainWindow):
         body.addWidget(self._build_sidebar())
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_home())
-        # Matrix is the last rail entry and has a page of its own; the
-        # sections between it and Home are still to come.
-        for _ in range(len(self.NAV) - 2):
-            self.pages.addWidget(self._build_placeholder())
+        self.light_page = LightPage(lambda: self.colour)
+        self.light_page.apply_requested.connect(self.apply_light)
         self.matrix_page = MatrixPage(lambda: self.colour)
         self.matrix_page.upload_requested.connect(self.start_upload)
         self.matrix_page.cancel_requested.connect(self.cancel_upload)
         self.matrix_page.status.connect(self.set_status)
-        self.pages.addWidget(self.matrix_page)
+        # The rail's sections, in its order; the ones with no screen yet
+        # get the placeholder.
+        built = {0: self._build_home(), 3: self.light_page,
+                 7: self.matrix_page}
+        for index in range(len(self.NAV)):
+            self.pages.addWidget(built.get(index) or self._build_placeholder())
         self.setup_page = SetupPage()
         self.setup_page.look_again.connect(self.reconnect)
         self.pages.addWidget(self.setup_page)
@@ -1307,7 +1425,22 @@ class MainWindow(QMainWindow):
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_effect.emit(
-            mode, *rgb, self.brightness.value(), self.speed.value()
+            mode, *rgb, self.brightness.value(), self.speed.value(), 0
+        )
+
+    def apply_light(self, mode: int, rgb: int, brightness: int, speed: int,
+                    direction: int) -> None:
+        """The Light screen's own request, which carries a direction."""
+        name = protocol.EFFECT_BY_MODE.get(mode)
+        self.last_packet.setText(" ".join(
+            f"{b:02X}" for b in protocol.data_frame(
+                mode, ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF),
+                p9=brightness, p10=speed, p11=direction)[:16]
+        ))
+        self.set_status(f"applying {name.name if name else f'{mode:#04x}'}…")
+        self.request_effect.emit(
+            mode, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF,
+            brightness, speed, direction,
         )
 
 

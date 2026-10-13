@@ -136,13 +136,14 @@ class DeviceWorker(QObject):
             # never show a colour the keyboard refused.
             self.key_applied.emit(index, rgb[0] << 16 | rgb[1] << 8 | rgb[2])
 
-    @Slot(int, int, int, int, int, int)
+    @Slot(int, int, int, int, int, int, int)
     def set_effect(self, mode: int, r: int, g: int, b: int,
-                   brightness: int, speed: int) -> None:
+                   brightness: int, speed: int, direction: int = 0) -> None:
         self._guard(
             f"effect {mode:#04x}",
             lambda: self.kb.set_effect(
-                mode, (r, g, b), brightness=brightness, speed=speed
+                mode, (r, g, b), brightness=brightness, speed=speed,
+                direction=direction
             ),
         )
 
