@@ -79,6 +79,24 @@ class CommandLine(unittest.TestCase):
         code, _ = self.run_cli(["strip", "fill", "nope", "--dry-run"])
         self.assertEqual(code, 2)
 
+    def test_every_animating_path_defaults_to_the_boosted_rate(self):
+        # One of these per command that uploads frames, so a new one
+        # cannot quietly inherit the slow default.
+        for argv in (["pattern", "tetris", "--dry-run"],):
+            code, out = self.run_cli(argv)
+            self.assertEqual(code, 0, argv)
+            self.assertIn(f"speed {matrix.DEFAULT_PLAYBACK_SPEED}", out)
+            self.assertIn(
+                f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms",
+                out)
+
+    def test_an_explicit_speed_still_wins(self):
+        code, out = self.run_cli(
+            ["pattern", "tetris", "--speed", str(matrix.NATIVE_SPEED),
+             "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn(f"speed {matrix.NATIVE_SPEED}", out)
+
     def test_effect_scan_refuses_when_nothing_can_answer_it(self):
         with unittest.mock.patch.object(sys.stdin, "isatty", lambda: False):
             code, _ = self.run_cli(["effect-scan"])

@@ -480,3 +480,18 @@ class SpeedMapping(unittest.TestCase):
     def test_asking_for_the_impossible_clamps(self):
         self.assertGreaterEqual(matrix.speed_for_ms(0), 1)
         self.assertLessEqual(matrix.speed_for_ms(10_000), 100)
+
+    def test_the_default_is_boosted_past_the_native_rate(self):
+        # The wire value is a whole number of delay units, so the boost
+        # lands near 1.25 rather than on it -- the next step down the
+        # scale would be 1.27.
+        boost = (matrix.frame_ms(matrix.NATIVE_SPEED)
+                 / matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED))
+        self.assertAlmostEqual(boost, matrix.PLAYBACK_BOOST, delta=0.02)
+
+    def test_the_default_is_a_setting_the_keyboard_accepts(self):
+        self.assertTrue(1 <= matrix.DEFAULT_PLAYBACK_SPEED <= 100)
+        # Nothing was clamped on the way to the wire.
+        self.assertEqual(
+            matrix.speed_to_byte(matrix.DEFAULT_PLAYBACK_SPEED),
+            matrix.SPEED_BASE - matrix.DEFAULT_PLAYBACK_SPEED)

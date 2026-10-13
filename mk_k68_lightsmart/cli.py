@@ -377,6 +377,9 @@ def cmd_pattern(args: argparse.Namespace) -> int:
     print(f"frames        : {len(frames)}")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
+    print(f"playback      : speed {args.speed}, about "
+          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
+          f"{len(frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -418,6 +421,9 @@ def cmd_image(args: argparse.Namespace) -> int:
     print(f"importing     : {len(loaded.frames)} frames ({kept})")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
+    print(f"playback      : speed {args.speed}, about "
+          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
+          f"{len(loaded.frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -581,9 +587,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--frames-each", type=int, default=1, dest="frames_each",
                    help="frames per panel (default 1)")
     m.add_argument("--brightness", type=int, default=100, help="0-100")
-    m.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    m.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help="1-100; the default is a quarter faster than the "
+                        "rate the vendor's own designs assume (~80 ms a "
+                        "frame)")
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
 
@@ -594,17 +601,20 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="SECONDS", help="seconds per effect (default 300)")
     ro.add_argument("--shuffle", action="store_true")
     ro.add_argument("--brightness", type=int, default=100, help="0-100")
-    ro.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                    help="1-100; the default is the vendor's own rate")
+    ro.add_argument("--speed", type=int,
+                    default=matrix.DEFAULT_PLAYBACK_SPEED,
+                    help="1-100; the default is a quarter faster than the "
+                         "vendor's own rate")
     ro.set_defaults(func=cmd_rotate)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
     pt.add_argument("name", nargs="?",
                     help="which one; omit to list them")
     pt.add_argument("--brightness", type=int, default=100, help="0-100")
-    pt.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    pt.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help="1-100; the default is a quarter faster than the "
+                        "rate the vendor's own designs assume (~80 ms a "
+                        "frame)")
     pt.add_argument("--dry-run", action="store_true")
     pt.set_defaults(func=cmd_pattern)
 
@@ -614,9 +624,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep every nth frame (default 1)")
     i.add_argument("--frames", type=int, help="stop after this many frames")
     i.add_argument("--brightness", type=int, default=100, help="0-100")
-    i.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                   help="1-100; the default plays at the rate the vendor's "
-                        "own designs assume (~100 ms a frame)")
+    i.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+                   help="1-100; the default is a quarter faster than the "
+                        "rate the vendor's own designs assume (~80 ms a "
+                        "frame)")
     i.add_argument("--dry-run", action="store_true")
     i.set_defaults(func=cmd_image)
 

@@ -450,9 +450,9 @@ class MatrixPage(QWidget):
         speed.addWidget(caption("Speed"))
         self.speed = QSlider(Qt.Horizontal)
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
-        # The rate the vendor's own designs assume, which is what the
-        # shipped effects were drawn at.
-        self.speed.setValue(matrix.NATIVE_SPEED)
+        # A quarter faster than the rate the shipped effects were drawn
+        # at, which is what the rest of the program defaults to too.
+        self.speed.setValue(matrix.DEFAULT_PLAYBACK_SPEED)
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)
         speed.addWidget(self.speed)
@@ -581,10 +581,13 @@ class MatrixPage(QWidget):
     def _interval_ms(speed: int) -> int:
         """Preview pacing, from the same 1..100 the keyboard is sent.
 
-        This is the local preview only: how the firmware turns its speed
-        byte into a frame rate is not known, so the two need not agree.
+        The firmware's mapping is calibrated now, so the preview uses
+        it rather than a guess of its own and the label states what the
+        strip will actually do. The floor is the preview's own limit:
+        the top of the scale asks for 3 ms a frame, which no timer here
+        is going to hit.
         """
-        return max(20, 420 - 4 * speed)
+        return max(16, round(matrix.frame_ms(speed)))
 
     def toggle_play(self) -> None:
         if self._playing:

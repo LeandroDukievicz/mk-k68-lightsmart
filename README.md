@@ -141,9 +141,10 @@ one is the picture you paint on, and the whole list goes to the keyboard
 as one animation — up to the firmware's 941.
 
 - **Add**, **Duplicate**, **Delete**, **Clear this frame**.
-- **Play** previews the animation in the window. The pacing is local:
-  how the firmware turns its speed byte into a frame rate is not known
-  yet, so the preview is an approximation, not a simulation.
+- **Play** previews the animation in the window, at the frame rate the
+  speed slider will give the keyboard — the firmware's mapping is
+  calibrated, so the label says what the strip will do. Only the top of
+  the slider parts company with it, where the preview floors at 16 ms.
 - **Upload animation** streams the whole thing, with the same progress
   bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
   seconds.
