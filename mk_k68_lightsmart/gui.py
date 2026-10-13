@@ -1057,6 +1057,13 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self._build_topbar())
 
+        # Built before the screens rather than after them, although it
+        # sits at the bottom: a screen can report something while it is
+        # still being built, and a status sink that does not exist yet
+        # turns that into an exception inside a Qt slot, where it is
+        # printed and swallowed instead of failing loudly.
+        statusbar = self._build_statusbar()
+
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
@@ -1083,10 +1090,21 @@ class MainWindow(QMainWindow):
 
         self.macro_page = screens.MacroPage()
         self.macro_page.status.connect(self.set_status)
+
         self.profiles_page = screens.ProfilesPage()
         self.profiles_page.status.connect(self.set_status)
+        # Switching a scheme is a replay, because the keyboard has no
+        # command for it. The screens themselves re-read the scheme
+        # when they next come up, so the only thing to do here is put
+        # it on the hardware.
+        self.profiles_page.replay_requested.connect(self.replay_scheme)
+        self.profiles_page.scheme_changed.connect(self.on_scheme_changed)
+
         self.music_page = screens.MusicPage()
         self.music_page.status.connect(self.set_status)
+        # The same handler as the custom screen: both are painting
+        # keys, and the worker coalesces them per key either way.
+        self.music_page.apply_key.connect(self.on_custom_key)
 
         # The rail's sections, in its order. Every one has a screen now.
         built = {0: self._build_home(), 1: self.keys_page,
@@ -1103,7 +1121,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
 
-        outer.addWidget(self._build_statusbar())
+        outer.addWidget(statusbar)
 
         self._wire_device()
         self.set_status("looking for the keyboard…")
@@ -1474,6 +1492,17 @@ class MainWindow(QMainWindow):
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_key.emit(key.light_index, *rgb)
+
+    def on_scheme_changed(self, scheme) -> None:
+        """Say which scheme is in use now.
+
+        Nothing else is needed: each screen re-reads the scheme when it
+        next comes up, so they cannot show another one's work, and
+        putting it on the keyboard is a separate ask -- the profiles
+        screen decides whether a switch replays, because half of a
+        replay is a persistent write.
+        """
+        self.set_status(f"scheme: {scheme.name}")
 
     def replay_scheme(self, write_keymap: bool = True) -> None:
         """Put the active scheme back on the keyboard.
