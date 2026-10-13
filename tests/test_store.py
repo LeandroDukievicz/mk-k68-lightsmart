@@ -101,6 +101,31 @@ class TheFile(unittest.TestCase):
                          ["schemes.json"])
 
 
+class TheSharedOne(unittest.TestCase):
+    """Four screens, one file: they have to be looking at one object."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.previous = store._shared
+        store.use(store.Store(path=Path(self.dir.name) / "s.json"))
+
+    def tearDown(self):
+        store._shared = self.previous
+        self.dir.cleanup()
+
+    def test_every_caller_gets_the_same_object(self):
+        self.assertIs(store.shared(), store.shared())
+
+    def test_a_change_through_one_caller_is_seen_by_the_next(self):
+        store.shared().add("Work")
+        self.assertEqual(store.shared().names(), ["Default", "Work"])
+
+    def test_installing_one_replaces_what_was_there(self):
+        other = store.Store(path=Path(self.dir.name) / "other.json")
+        store.use(other)
+        self.assertIs(store.shared(), other)
+
+
 VERSION_AHEAD = store.VERSION + 1
 
 

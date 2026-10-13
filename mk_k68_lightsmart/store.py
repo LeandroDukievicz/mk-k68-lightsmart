@@ -42,6 +42,32 @@ def config_dir() -> Path:
     return root / "mk-k68-lightsmart"
 
 
+#: The one store the app reads and writes. See :func:`shared`.
+_shared: "Store | None" = None
+
+
+def shared() -> "Store":
+    """The store every screen works through.
+
+    Each screen keeps a different part of a scheme, and saving writes
+    the whole file. Four screens each holding their own ``Store.load()``
+    would be four views of one file, and whichever saved last would
+    quietly drop the other three's work. So there is exactly one, and
+    screens take it from here rather than loading their own.
+    """
+    global _shared
+    if _shared is None:
+        _shared = Store.load()
+    return _shared
+
+
+def use(store: "Store") -> None:
+    """Put a different store in place, which is how tests stay off the
+    real file: build one on a temporary path and hand it over here."""
+    global _shared
+    _shared = store
+
+
 @dataclass
 class Scheme:
     """One named bundle of everything the host can put on the keyboard.
