@@ -1475,6 +1475,34 @@ class MainWindow(QMainWindow):
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_key.emit(key.light_index, *rgb)
 
+    def replay_scheme(self, write_keymap: bool = True) -> None:
+        """Put the active scheme back on the keyboard.
+
+        A scheme is a host-side bundle because the keyboard has no
+        command to switch one — the vendor's own driver sends it
+        nothing when a scheme changes and re-sends the contents instead
+        (docs/PROTOCOL.md §10). So "switching" means exactly this:
+        the keymap as one block, then the painted layout a key at a
+        time.
+
+        ``write_keymap`` is separate because the two halves differ in
+        how much they cost to be wrong. The lighting is gone at the
+        next effect; the keymap outlives the power cycle. A caller that
+        has not asked anybody should pass False.
+        """
+        from . import store as scheme_store
+
+        scheme = scheme_store.shared().current
+        changes = scheme.remap_changes()
+        if write_keymap and changes:
+            self.request_keymap.emit(protocol.remap_block(changes), False)
+        for index, rgb in scheme.lighting.items():
+            self.request_key.emit(
+                index, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF)
+        self.set_status(
+            f"{scheme.name}: {len(changes)} remapped, "
+            f"{len(scheme.lighting)} lit")
+
     def on_custom_key(self, light_index: int, colour: QColor) -> None:
         """Send one key of a painted layout.
 
