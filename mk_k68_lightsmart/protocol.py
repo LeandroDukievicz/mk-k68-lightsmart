@@ -191,6 +191,17 @@ REMAP_RECORD = 4
 #: Where the AA 55 goes, past the records rather than at the end.
 REMAP_MAGIC_AT = 574
 
+#: How many of a block's bytes actually reach the keyboard.
+#:
+#: The driver hands its sender all 694 (`0x4171DC`), but that sender
+#: transmits `(len >> 6) - 1` reports of 64 bytes (`0x455FF1`) -- so 576
+#: go out and the last 118 never leave the host. That is not a quirk to
+#: work around: 576 is the byte after the `AA 55` at
+#: :data:`REMAP_MAGIC_AT`, which is exactly why the magic sits short of
+#: the block's end instead of at it. The tail is the vendor's struct,
+#: not the wire format.
+REMAP_SENT = 576
+
 #: Record types the driver writes.
 REMAP_UNCHANGED = (0x05, 0x03, 0x00, 0x00)
 REMAP_KEY = 0x02
@@ -245,6 +256,19 @@ def remap_block(changes: dict[int, tuple[int, int]] | None = None) -> bytes:
 
     buf[REMAP_MAGIC_AT], buf[REMAP_MAGIC_AT + 1] = FRAME_MAGIC
     return bytes(buf)
+
+
+def remap_defaults() -> bytes:
+    """The block the vendor's own "Reset Keyboard Data" writes.
+
+    There is no reset command. The menu item (string 410) confirms, then
+    queues operation 4, and the dispatcher case 4
+    (`method.KeyboardDlg.virtual_0` at `0x43A856`) calls the keymap
+    sender and the Fn-layer sender -- nothing else. So the way back from
+    a keymap written wrong is this block through :data:`SUB_KEYMAP`, and
+    the same through :data:`SUB_FNLAYER`, both of which are already here.
+    """
+    return remap_block()
 
 
 class Keyboard:
@@ -414,6 +438,46 @@ class Keyboard:
             self._step(control(SUB_APPLY))
         except TransportError:
             pass
+
+    # -- key remapping --------------------------------------------------
+    def write_keymap(self, block: bytes, fn_layer: bool = False) -> int:
+        """Make ``block`` the keyboard's keymap, or its Fn layer.
+
+        **This persists.** A keymap survives a power cycle and an
+        unplug, so a wrong one keeps typing the wrong letters until
+        something writes a right one. That something is
+        :func:`remap_defaults`, which is the same block the vendor's own
+        reset writes -- there is no reset command to fall back on.
+
+        The envelope is the driver's, and it is *not*
+        :meth:`transaction`: the keymap path goes straight from begin to
+        the announce with no ``04 13`` in between (`0x416F6D`), because
+        there is no lighting target to select. Byte 8 of the announce is
+        9 (`0x416F9A`), which is the one field the driver sets.
+
+        Only :data:`REMAP_SENT` of the block goes out, in 64-byte
+        reports. Returns how many were sent.
+        """
+        if len(block) < REMAP_SENT:
+            raise ValueError(
+                f"a remap block is at least {REMAP_SENT} bytes, got "
+                f"{len(block)}"
+            )
+        sub = SUB_FNLAYER if fn_layer else SUB_KEYMAP
+        payload = block[:REMAP_SENT]
+        blocks = REMAP_SENT // REPORT_SIZE
+
+        self._step(control(SUB_BEGIN))
+        try:
+            self._step(control(sub, b8=0x09))
+            for i in range(blocks):
+                self.t.set_feature(
+                    payload[i * REPORT_SIZE : (i + 1) * REPORT_SIZE]
+                )
+            self._step(control(SUB_APPLY))
+        finally:
+            self._end_quietly()
+        return blocks
 
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.

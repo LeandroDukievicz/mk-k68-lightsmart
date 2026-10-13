@@ -1303,10 +1303,15 @@ class MainWindow(QMainWindow):
     PENDING = {
         1: ("Key remapping",
             "The block is decoded: 694 bytes, four per key, and the slot "
-            "each key sits in. The encoder is written and tested.\n\n"
-            "Nothing writes it yet. A keymap survives a power cycle, and "
-            "the way back from a wrong one runs through the same untested "
-            "path — so the reset command has to be found first."),
+            "each key sits in. Of those, 576 are what actually go to the "
+            "keyboard.\n\n"
+            "The write works from the command line — 'remap --set "
+            "Caps=0xe0', and 'remap --defaults' to put it back. The "
+            "reset turned out not to be a command at all: the vendor's "
+            "own reset writes that same default map, so the way back is "
+            "the write.\n\n"
+            "What is missing here is the screen: a keyboard to click and "
+            "a key to pick for each one."),
         2: ("Macros",
             "The command and its framing are known (0x15, sent in 64-byte "
             "blocks). The event encoding is not: a key press emits a 0x50 "

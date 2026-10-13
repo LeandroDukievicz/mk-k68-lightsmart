@@ -52,7 +52,7 @@ app's nine screens are built.
 | Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
-| Key remapping | 🔍 slots and envelope decoded, records partly; nothing written to the keyboard yet |
+| Key remapping | ✅ writes from the CLI, with the vendor's own default map as the way back; not yet confirmed on hardware, and no screen for it |
 | Macros | 🔍 opcodes located, event encoding not decoded |
 | Music-reactive, settings screens | ⬜ not started |
 
@@ -178,6 +178,11 @@ Useful for protocol work, since it sends one packet at a time.
 ./mk-k68-lightsmart strip test
 ./mk-k68-lightsmart strip fill 00FF00 --brightness 40
 ./mk-k68-lightsmart strip clear
+
+# remap a key, and put the vendor's own default map back. This one
+# persists across a power cycle, so it asks before it writes.
+./mk-k68-lightsmart remap --set Caps=0xe0 --dry-run
+./mk-k68-lightsmart remap --defaults
 
 # walk the effect modes, recording what each one does
 ./mk-k68-lightsmart effect-scan

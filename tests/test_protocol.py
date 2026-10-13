@@ -436,3 +436,89 @@ class RemapRecords(unittest.TestCase):
         changes = {slot: (0x04, 0) for slot in layout.REMAP_SLOTS.values()}
         block = protocol.remap_block(changes)
         self.assertEqual(len(block), 694)
+
+
+class AckingTransport:
+    """Acks everything and remembers what it was handed."""
+
+    path = "/dev/hidraw-fake"
+
+    def __init__(self):
+        self.sent: list[bytes] = []
+
+    def set_feature(self, payload: bytes) -> None:
+        self.sent.append(bytes(payload))
+
+    def get_feature(self) -> bytes:
+        reply = bytearray(transport.REPORT_SIZE)
+        reply[transport.ACK_OFFSET] = transport.ACK_OK
+        return bytes(reply)
+
+    def close(self) -> None:
+        pass
+
+    def heads(self, n: int = 2) -> list[str]:
+        return [hexs(p, n) for p in self.sent]
+
+
+class KeymapWrite(unittest.TestCase):
+    """What a keymap write puts on the wire.
+
+    Read off `fcn.00416F20`: begin, the announce with byte 8 = 9, the
+    block, apply, end -- and crucially only 576 of the 694 bytes, which
+    is what `fcn.00455E50` transmits for that length.
+    """
+
+    def setUp(self):
+        self.t = AckingTransport()
+        self.kb = protocol.Keyboard(self.t)
+
+    def test_the_default_block_is_what_the_vendors_reset_writes(self):
+        # Not a separate encoder: the reset is this block, so the two
+        # must not drift apart.
+        self.assertEqual(protocol.remap_defaults(), protocol.remap_block())
+
+    def test_nothing_is_lost_by_sending_only_576(self):
+        # The tail past what goes out has to be empty, or truncating it
+        # would be dropping content rather than dropping padding.
+        block = protocol.remap_defaults()
+        self.assertEqual(set(block[protocol.REMAP_SENT:]), {0})
+
+    def test_the_magic_is_the_last_thing_sent(self):
+        block = protocol.remap_defaults()
+        self.assertEqual(protocol.REMAP_SENT, protocol.REMAP_MAGIC_AT + 2)
+        self.assertEqual(
+            tuple(block[protocol.REMAP_SENT - 2:protocol.REMAP_SENT]),
+            protocol.FRAME_MAGIC)
+
+    def test_the_sent_length_is_whole_reports(self):
+        self.assertEqual(protocol.REMAP_SENT % transport.REPORT_SIZE, 0)
+
+    def test_the_envelope_matches_the_driver(self):
+        sent = self.kb.write_keymap(protocol.remap_defaults())
+        self.assertEqual(sent, 9)
+        heads = self.t.heads()
+        # No 04 13 after the begin: there is no lighting target here.
+        self.assertEqual(heads[0], "04 18")
+        self.assertEqual(heads[1], "04 11")
+        self.assertEqual(heads[-2:], ["04 02", "04 F0"])
+        self.assertEqual(len(self.t.sent), 2 + 9 + 2)
+
+    def test_the_announce_sets_byte_eight(self):
+        self.kb.write_keymap(protocol.remap_defaults())
+        self.assertEqual(self.t.sent[1][8], 0x09)
+
+    def test_the_fn_layer_goes_to_its_own_command(self):
+        self.kb.write_keymap(protocol.remap_defaults(), fn_layer=True)
+        self.assertEqual(self.t.heads()[1], "04 27")
+
+    def test_the_payload_is_the_block_in_order(self):
+        block = protocol.remap_block(
+            {layout.remap_slot(layout.BY_IDENT["Caps"]): (0xE0, 0)})
+        self.kb.write_keymap(block)
+        streamed = b"".join(self.t.sent[2:-2])
+        self.assertEqual(streamed, block[:protocol.REMAP_SENT])
+
+    def test_a_block_too_short_to_hold_the_records_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.kb.write_keymap(bytes(protocol.REMAP_SENT - 1))

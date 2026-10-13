@@ -97,6 +97,39 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f"speed {matrix.NATIVE_SPEED}", out)
 
+    def test_a_remap_dry_run_says_how_much_of_the_block_goes_out(self):
+        code, out = self.run_cli(["remap", "--defaults", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("576 of 694 bytes", out)
+        self.assertIn("nothing sent", out)
+
+    def test_a_remap_dry_run_shows_the_record_it_would_write(self):
+        code, out = self.run_cli(
+            ["remap", "--set", "Esc=0x35", "--dry-run"])
+        self.assertEqual(code, 0)
+        # Type 2, no modifier, the usage in byte 2.
+        self.assertIn("02 00 35 00", out)
+
+    def test_a_remap_needs_to_be_told_what_to_write(self):
+        code, _ = self.run_cli(["remap", "--dry-run"])
+        self.assertEqual(code, 2)
+
+    def test_a_remap_refuses_both_at_once(self):
+        code, _ = self.run_cli(
+            ["remap", "--defaults", "--set", "Esc=0x35", "--dry-run"])
+        self.assertEqual(code, 2)
+
+    def test_a_remap_rejects_a_key_that_is_not_one(self):
+        code, _ = self.run_cli(["remap", "--set", "Nope=0x35", "--dry-run"])
+        self.assertEqual(code, 2)
+
+    def test_a_real_remap_will_not_write_unasked(self):
+        # The one command here whose effect outlives the process, so it
+        # must not go through on a pipe with nobody to answer.
+        with unittest.mock.patch.object(sys.stdin, "isatty", lambda: False):
+            code, _ = self.run_cli(["remap", "--defaults"])
+        self.assertEqual(code, 2)
+
     def test_effect_scan_refuses_when_nothing_can_answer_it(self):
         with unittest.mock.patch.object(sys.stdin, "isatty", lambda: False):
             code, _ = self.run_cli(["effect-scan"])

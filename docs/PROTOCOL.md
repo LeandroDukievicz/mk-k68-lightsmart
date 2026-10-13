@@ -446,9 +446,15 @@ decides the shape:
 Usages `0xF1`-`0xF3` and `0xD3` take their own branches (`0x4172B1`),
 writing the original key's usage into byte 2 and the special id into
 byte 3. Bytes 1 and 2 of an ordinary remap come out of `fcn.004588A0`,
-which is not decoded yet — so **nothing here writes a keymap to the
-keyboard**. A keymap is persistent, and a wrong one types the wrong
-letters until it is corrected.
+which is decoded — a switch on `usage - 0xE0` over eight arms, so a
+modifier becomes its bit.
+
+A keymap is persistent: a wrong one types the wrong letters until
+something writes a right one. That used to be the reason nothing here
+sent one. It no longer is — the vendor's own reset writes the default
+block through this same command, so the way back exists and is in
+`remap_defaults()`; see §10. `Keyboard.write_keymap()` sends a block,
+and the `remap` command asks before it does.
 
 ## 8. Macros
 
@@ -493,11 +499,55 @@ not decoded yet.
    | `0x15` | 1 | macro |
    | `0x17` `0x19` `0x23` `0x61` `0xF5` | 1 each | — |
 
-   One of the unknown five is almost certainly the reset: the vendor UI
-   offers "Reset Keyboard Data" and "Restore Factory Settings" (strings
-   410 and 411), so the firmware has the command. Finding it is the
-   first step towards a key-remap screen, because it is the way back
-   from a keymap written wrong.
+   ~~One of the unknown five is almost certainly the reset~~ — it is
+   none of them. There is no reset command; see §10. Of the five,
+   `0x17` and `0x23` are reached from the dialog's idle tick
+   (`method.KeyboardDlg.virtual_0` cases 7 and 6), `0x19` sits in the
+   macro builder beside `0x15`, and `0x20` and `0x61` are still open.
+
+## 10. The reset, which is not a command
+
+The vendor UI offers "Reset Keyboard Data" (string 410, confirmed by
+80/81) and "Restore Factory Settings" (411, confirmed by 82/83), so the
+search was for a reset opcode. There isn't one. The chain, read end to
+end:
+
+```
+"Reset Keyboard Data"
+  → fcn.004378F0        confirm with strings 81/80, cancel returns 0
+  → queue op 4          appended at [this+0x7F0], count at [this+0x7F4]
+  → Sleep(500)
+  → method.KeyboardDlg.virtual_0, case 4   (0x43A856; the queue reads
+                                            as [this+0x544]/[+0x548],
+                                            the same fields less 0x2AC)
+  → fcn.00416F20        04 18, then 04 11 with byte 8 = 9, then the
+                        block, then 04 02, 04 F0
+  → fcn.00417710        the same again through 04 27
+```
+
+So the reset *is* the keymap write: the default block through `0x11`,
+and the same through `0x27` for the Fn layer. Both commands were
+already decoded, and `remap_block()` with no changes already produces
+that block — every key carrying the `05 03 00 00` "left as it is"
+record. `protocol.remap_defaults()` names it, and `remap --defaults`
+sends it.
+
+This removes the blocker on a key-remap screen. The way back from a
+keymap written wrong is not an undiscovered command; it is this.
+
+### What actually goes out
+
+The announce carries no block count — unlike the animation, the
+firmware knows a keymap's size. The driver passes its sender all 694
+bytes (`0x4171DC`) but that sender, `fcn.00455E50`, transmits
+`(len >> 6) - 1` reports of 64 (`0x455FF1`): **576 bytes, 9 reports**,
+and the last 118 never leave the host.
+
+576 is not an accident. It is the byte after the `AA 55` that sits at
+574, which is what made the magic look misplaced — it is at the end of
+what is *sent*, not of the struct. Note that `fcn.00455E50` is not the
+animation's sender; that is `fcn.004561C0` (§6), which applies
+`(len >> 6) + 1` instead. Three senders, three lengths.
 
 What is left is quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.

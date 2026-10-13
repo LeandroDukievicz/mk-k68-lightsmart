@@ -442,6 +442,83 @@ def cmd_image(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_remap(text: str) -> tuple[int, int]:
+    """Turn ``KEY=USAGE`` into the slot and the usage it should send."""
+    name, _, usage = text.partition("=")
+    if not usage:
+        raise ValueError(f"expected KEY=USAGE, got {text!r}")
+    key = layout.BY_LIGHT_INDEX[_resolve_key(name.strip())]
+    try:
+        code = int(usage.strip(), 0)
+    except ValueError:
+        raise ValueError(f"{usage.strip()!r} is not a HID usage") from None
+    if not 0 <= code <= 0xFF:
+        raise ValueError(f"usage {code:#x} is not a byte")
+    return layout.remap_slot(key), code
+
+
+def cmd_remap(args: argparse.Namespace) -> int:
+    """Write the key map, or put the vendor's own default back.
+
+    The reset turned out not to be a command: the vendor's "Reset
+    Keyboard Data" writes this same default block through the same
+    0x11, so `--defaults` is the way back from a map written wrong and
+    there is nothing else behind it. That is the whole reason this
+    command can exist.
+    """
+    if args.defaults == bool(args.set):
+        raise ValueError("pass either --defaults or --set KEY=USAGE, not both")
+
+    named: list[tuple[str, int]] = []
+    if args.defaults:
+        block = protocol.remap_defaults()
+        what = "the vendor's default map - every key left as it is"
+    else:
+        changes: dict[int, tuple[int, int]] = {}
+        for text in args.set:
+            slot, usage = _parse_remap(text)
+            named.append((text.partition("=")[0].strip(), slot))
+            changes[slot] = (usage, 0)
+        block = protocol.remap_block(changes)
+        what = f"{len(changes)} of 69 keys"
+
+    layer = "Fn layer" if args.fn_layer else "keymap"
+    blocks = protocol.REMAP_SENT // transport.REPORT_SIZE
+    print(f"target        : {layer}")
+    print(f"writing       : {what}")
+    print(f"payload       : {protocol.REMAP_SENT} of {len(block)} bytes, "
+          f"{blocks} blocks")
+    # A persistent write earns showing what it changes, record by
+    # record, rather than a byte count to be taken on trust.
+    for name, slot in named:
+        at = slot * protocol.REMAP_RECORD
+        print(f"  {name:<12} slot {slot:>3}  "
+              f"{block[at:at + protocol.REMAP_RECORD].hex(' ')}")
+
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    # A keymap outlives the process that wrote it, which none of the
+    # other commands here do. So this one asks, unless told not to.
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise ValueError(
+                "a keymap persists across a power cycle, so this asks before "
+                "writing. Run it in a terminal, or pass --yes"
+            )
+        print("\nthis persists across a power cycle. "
+              "'mk-k68-lightsmart remap --defaults' is the way back.")
+        if input("write it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("nothing sent")
+            return 0
+
+    with protocol.Keyboard() as kb:
+        sent = kb.write_keymap(block, fn_layer=args.fn_layer)
+    print(f"sent          : {sent} blocks")
+    return 0
+
+
 def cmd_effect_scan(args: argparse.Namespace) -> int:
     """Walk the effect modes one at a time, recording what each does.
 
@@ -580,6 +657,20 @@ def main(argv: list[str] | None = None) -> int:
     es.add_argument("--dwell", type=float, default=4.0,
                     help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
+
+    rm = sub.add_parser(
+        "remap", help="write the key map (it persists across a power cycle)")
+    rm.add_argument("--set", action="append", metavar="KEY=USAGE",
+                    help="remap one key to a HID usage; repeatable")
+    rm.add_argument("--defaults", action="store_true",
+                    help="write the map the vendor's own reset writes, "
+                         "which is the way back from a wrong one")
+    rm.add_argument("--fn-layer", action="store_true", dest="fn_layer",
+                    help="write the Fn layer instead of the base map")
+    rm.add_argument("--yes", action="store_true",
+                    help="do not ask before writing")
+    rm.add_argument("--dry-run", action="store_true")
+    rm.set_defaults(func=cmd_remap)
 
     u = sub.add_parser(
         "install-udev", help="install the udev rule the keyboard needs")
