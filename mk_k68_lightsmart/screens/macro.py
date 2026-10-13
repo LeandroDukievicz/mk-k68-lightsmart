@@ -9,11 +9,14 @@ from typing import NamedTuple
 from PySide6.QtCore import QElapsedTimer, Qt, Signal
 from PySide6.QtGui import QFont, QKeySequence
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
+    QMenu,
     QMessageBox,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -27,17 +30,40 @@ from .common import _card, _combo, _heading, _list, _note
 #: The kinds of event the vendor's recorder produces, in the order its
 #: own list offers them. These strings are what the scheme file holds as
 #: well as what the screen shows, so renaming one orphans every macro
-#: already saved.
+#: already saved -- which is also why a kind is only ever added to the
+#: end of this tuple.
 KEY_DOWN = "Key down"
 KEY_UP = "Key up"
 DELAY = "Delay (ms)"
 MOUSE = "Mouse button"
-KINDS = (KEY_DOWN, KEY_UP, DELAY, MOUSE)
+MOUSE_DOWN = "Mouse down"
+MOUSE_UP = "Mouse up"
+WHEEL = "Mouse wheel"
+KINDS = (KEY_DOWN, KEY_UP, DELAY, MOUSE, MOUSE_DOWN, MOUSE_UP, WHEEL)
 
-#: The three mouse buttons the vendor's mouse event can carry. Nothing
-#: here records one: while the keyboard is grabbed the mouse is not, so
-#: a recorded click would be the click that stopped the recording.
-MOUSE_BUTTONS = ("Left", "Right", "Middle")
+#: The kinds whose value names a mouse button. ``MOUSE`` is the whole
+#: click the insert panel stages; the recorder splits a real click into
+#: the pair, because a button held down across a delay is a thing a
+#: macro can mean and one event could not say it.
+MOUSE_KINDS = (MOUSE, MOUSE_DOWN, MOUSE_UP)
+
+#: Which mouse button a Qt event is about. Back and forward are absent
+#: on purpose: the vendor's own event offers three buttons, and a name
+#: this screen cannot offer in its own list is one nobody could edit.
+MOUSE_BY_BUTTON = {
+    Qt.LeftButton: "Left",
+    Qt.RightButton: "Right",
+    Qt.MiddleButton: "Middle",
+}
+
+#: The three mouse buttons a mouse event can carry, named as the value
+#: list offers them. Derived from the lookup above so that the names the
+#: recorder writes and the names the editor offers cannot drift apart.
+MOUSE_BUTTONS = tuple(MOUSE_BY_BUTTON.values())
+
+#: Which way the wheel turned. A notch is one event and not a pair:
+#: there is nothing to hold down.
+WHEEL_WAYS = ("Up", "Down")
 
 #: What recording does with the time between keystrokes -- the vendor's
 #: three choices, which are the only three there are.
@@ -46,9 +72,22 @@ NO_DELAY = "No delay"
 ONE_DELAY = "One delay for all"
 POLICIES = (KEEP_DELAYS, NO_DELAY, ONE_DELAY)
 
+#: The vendor's insert panel is a dropdown and one button rather than a
+#: button each, and these are the two things it can say.
+INSERT_BEFORE = "Insert before the selected event"
+INSERT_AFTER = "Insert after the selected event"
+PLACES = (INSERT_BEFORE, INSERT_AFTER)
+
 #: Stamped into an exported file so an unrelated JSON document is
 #: refused rather than read as a macro with nothing in it.
 FILE_KIND = "mk-k68-lightsmart-macro"
+
+#: The macro Copy last took, waiting for a Paste: its name and its
+#: events. On the module rather than on the screen so that a copy
+#: outlives the screen being rebuilt and crosses between schemes --
+#: copy in one scheme, switch, paste into the other -- which is the
+#: only thing Paste can do that Duplicate cannot.
+_copied: tuple[str, list["Event"]] | None = None
 
 
 class Event(NamedTuple):
@@ -100,6 +139,12 @@ class Event(NamedTuple):
             return f"release  {self.value}"
         if self.kind == MOUSE:
             return f"mouse    {self.value}"
+        if self.kind == MOUSE_DOWN:
+            return f"mouse    {self.value} down"
+        if self.kind == MOUSE_UP:
+            return f"mouse    {self.value} up"
+        if self.kind == WHEEL:
+            return f"wheel    {self.value}"
         return f"{self.kind}  {self.value}"
 
     def to_dict(self) -> dict:
@@ -120,6 +165,20 @@ def as_event(raw) -> Event:
                      str(raw.get("value", "")))
     kind, value = (list(raw) + ["", ""])[:2]
     return Event(str(kind), str(value))
+
+
+def value_choices(kind: str) -> list[str]:
+    """What the value control can offer for a kind of event.
+
+    One list per kind rather than one list with everything in it: the
+    vendor's panel swaps its field with the radio above it, and a key
+    name in a mouse event is not an event anybody meant.
+    """
+    if kind == WHEEL:
+        return list(WHEEL_WAYS)
+    if kind in MOUSE_KINDS:
+        return list(MOUSE_BUTTONS)
+    return [k.ident for k in kb_layout.KEYS]
 
 
 def events_from_recording(
@@ -221,6 +280,16 @@ def key_name(event) -> str:
     return QKeySequence(code).toString() or typed or f"0x{code:02x}"
 
 
+def mouse_name(button) -> str:
+    """The name of a mouse button, or ``""`` for one with no name here.
+
+    Empty rather than a made-up name: a button this screen cannot offer
+    in its value list is one nobody could edit afterwards, so the
+    recorder drops it instead of recording something uneditable.
+    """
+    return MOUSE_BY_BUTTON.get(button, "")
+
+
 def _spin(value: int, top: int = 60000) -> QSpinBox:
     """A number box in the chrome the shared combo box wears."""
     box = QSpinBox()
@@ -228,8 +297,39 @@ def _spin(value: int, top: int = 60000) -> QSpinBox:
     box.setValue(value)
     box.setStyleSheet(
         "QSpinBox { background:#0a2444; color:#cfe3ff;"
-        " border:1px solid #0d3a6b; border-radius:3px; padding:3px; }")
+        " border:1px solid #0d3a6b; border-radius:3px; padding:3px; }"
+        "QSpinBox:disabled { color:#44607f; border-color:#0a2748; }")
     return box
+
+
+def _radio(text: str) -> QRadioButton:
+    """One of a set of choices, in the same chrome as everything else.
+
+    The shared chrome has no radio button because this is the only
+    screen with a set of them, so the style lives beside its only use.
+    """
+    button = QRadioButton(text)
+    button.setStyleSheet(
+        "QRadioButton { color:#cfe3ff; font-size:11px; spacing:5px; }"
+        "QRadioButton::indicator { width:11px; height:11px;"
+        " border:1px solid #0d3a6b; border-radius:6px; background:#0a2444; }"
+        "QRadioButton::indicator:checked { background:#10a9fd;"
+        " border-color:#10a9fd; }"
+    )
+    return button
+
+
+def _menu(parent: QWidget) -> QMenu:
+    """A popup menu wearing the chrome the lists and combos wear."""
+    menu = QMenu(parent)
+    menu.setStyleSheet(
+        "QMenu { background:#0a2444; color:#cfe3ff; font-size:11px;"
+        " border:1px solid #0d3a6b; }"
+        "QMenu::item { padding:5px 18px; }"
+        "QMenu::item:selected { background:#0d3a6b; }"
+        "QMenu::item:disabled { color:#44607f; }"
+    )
+    return menu
 
 
 class RecordDialog(QDialog):
@@ -241,6 +341,16 @@ class RecordDialog(QDialog):
     shut it. For the same reason recording stops on a button and never
     on a key: every key on the board has to be recordable, which rules
     out holding one back to mean "stop".
+
+    The mouse is deliberately *not* grabbed, which is what decides how
+    much of it is recorded. A button press and a wheel notch over the
+    dialog's own body are recorded, because Qt hands those to the
+    dialog; a click on Stop or Discard is not, because the button under
+    the pointer takes it first -- so the pair of buttons still works
+    while the rest of the dialog is a mouse-recording surface. Pointer
+    movement is recorded by neither: a macro of this board's carries no
+    coordinates (docs/PROTOCOL.md §8), and tracking it would bury the
+    clicks under hundreds of events nobody asked for.
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -248,7 +358,7 @@ class RecordDialog(QDialog):
         self.setWindowTitle("Recording a macro")
         self.setModal(True)
         self.setMinimumWidth(380)
-        #: ``(ms since recording started, kind, key name)``, in order.
+        #: ``(ms since recording started, kind, name)``, in order.
         self.stamps: list[tuple[int, str, str]] = []
         # Started here as well as on show: a stamp taken before the
         # dialog is up would otherwise be read off an unstarted clock.
@@ -263,7 +373,10 @@ class RecordDialog(QDialog):
             "Type the macro now. Every press and every release is kept, "
             "with the time between them. Nothing reaches the rest of the "
             "app while this is open, so Esc and Enter record like any "
-            "other key — stop with the button.")
+            "other key — stop with the button. Mouse buttons and the "
+            "wheel record too, over this panel; the two buttons below "
+            "take their own clicks, and the pointer's travels are not "
+            "recorded at all.")
         hint.setWordWrap(True)
         outer.addWidget(hint)
         self.tally = caption("nothing yet")
@@ -272,7 +385,7 @@ class RecordDialog(QDialog):
         row = QHBoxLayout()
         row.addStretch()
         row.addWidget(ghost_button("Discard", self.reject))
-        row.addWidget(primary_button("Stop", self.accept))
+        row.addWidget(primary_button("Stop recording", self.accept))
         outer.addLayout(row)
         self.setStyleSheet("QDialog { background:#050b24; }")
 
@@ -292,18 +405,38 @@ class RecordDialog(QDialog):
             # A held key repeats at the host's rate. A macro wants the
             # one press and the wait, not a hundred presses.
             return
-        self._remember(KEY_DOWN, event)
+        self._stamp(KEY_DOWN, key_name(event))
 
     def keyReleaseEvent(self, event) -> None:
         if event.isAutoRepeat():
             return
-        self._remember(KEY_UP, event)
+        self._stamp(KEY_UP, key_name(event))
 
-    def _remember(self, kind: str, event) -> None:
-        # Deliberately no call up to QDialog from either handler: the
-        # base class closes on Esc and fires the default button on
+    def mousePressEvent(self, event) -> None:
+        self._mouse(MOUSE_DOWN, event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._mouse(MOUSE_UP, event)
+
+    def _mouse(self, kind: str, event) -> None:
+        # A nameless button -- back, forward, the ones down the side of
+        # a gaming mouse -- is dropped rather than guessed at.
+        name = mouse_name(event.button())
+        if name:
+            self._stamp(kind, name)
+
+    def wheelEvent(self, event) -> None:
+        # Only the vertical half: a wheel that tilts sideways is not
+        # something this board's own event can say.
+        turned = event.angleDelta().y()
+        if turned:
+            self._stamp(WHEEL, WHEEL_WAYS[0] if turned > 0 else WHEEL_WAYS[1])
+
+    def _stamp(self, kind: str, value: str) -> None:
+        # Deliberately no call up to QDialog from any of the handlers:
+        # the base class closes on Esc and fires the default button on
         # Enter, which would make those two keys unrecordable.
-        self.stamps.append((self._clock.elapsed(), kind, key_name(event)))
+        self.stamps.append((self._clock.elapsed(), kind, value))
         self.tally.setText(f"{len(self.stamps)} events so far")
 
     def events(self, policy: str, fixed_ms: int) -> list[Event]:
@@ -327,9 +460,12 @@ class MacroPage(QWidget):
     with. When those two bytes are known, the macro to send is already
     here.
 
-    The vendor's own screen is the model: a list of macros beside a
-    list of events, its three delay policies, and insert-before and
-    insert-after rather than a lone append.
+    The vendor's own screen is the model, down to its three columns:
+    the macro list on the left, the insert-event panel over the basic
+    commands and the recorder in the middle, and the macro record on
+    the right with its own small toolbar and a save. Its right-click
+    menu over the list is here too, Paste and all, and so are its three
+    delay policies.
     """
 
     status = Signal(str)
@@ -339,7 +475,9 @@ class MacroPage(QWidget):
         #: name -> its events: the working copy of ``scheme.macros``,
         #: kept as objects here and as dicts in the file.
         self.macros: dict[str, list[Event]] = {}
-        self._value_holds_keys = True
+        #: What the value control is offering, so that a kind change
+        #: that does not change the list leaves what was typed alone.
+        self._offered: list[str] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 14, 20, 14)
@@ -359,55 +497,104 @@ class MacroPage(QWidget):
         body = QHBoxLayout()
         body.setSpacing(14)
 
+        # -- the macro list, the vendor's far-left column ---------------
         self.names = _list()
         self.names.currentTextChanged.connect(self._show)
+        # The vendor puts new, import and paste on the blank space of
+        # this list and nowhere else, so the menu is not a duplicate of
+        # the buttons: Paste has no button.
+        self.names.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.names.customContextMenuRequested.connect(self._names_menu)
+        left = _card(caption("Macro list"), self.names)
+        left.setFixedWidth(210)
+        body.addWidget(left)
+
+        # -- insert, the basic commands, and recording ------------------
+        self.where = _combo(list(PLACES))
+        self.kind = _combo(list(KINDS))
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self.value = _combo()
+        self.value.setEditable(True)
+        self.ms = _spin(50)
+        value_row = QHBoxLayout()
+        value_row.addWidget(self.value, 1)
+        value_row.addWidget(self.ms)
+
+        insert_row = QHBoxLayout()
+        insert_row.addWidget(primary_button("Insert", self._insert_here))
+        insert_row.addWidget(ghost_button("Append", self._add))
+        insert_row.addWidget(ghost_button("Change", self._replace))
+        insert_row.addStretch()
+
         made = QHBoxLayout()
         made.addWidget(primary_button("New", self._new))
         made.addWidget(ghost_button("Rename", self._rename))
+        made.addWidget(ghost_button("Delete", self._delete))
         made.addStretch()
         kept = QHBoxLayout()
+        kept.addWidget(ghost_button("Copy", self._copy))
+        kept.addWidget(ghost_button("Paste", self._paste))
         kept.addWidget(ghost_button("Duplicate", self._duplicate))
-        kept.addWidget(ghost_button("Delete", self._delete))
         kept.addStretch()
         shared = QHBoxLayout()
         shared.addWidget(ghost_button("Import…", self._import))
         shared.addWidget(ghost_button("Export…", self._export))
         shared.addStretch()
-        left = _card(caption("Macros"), self.names, made, kept,
-                     caption("As a file, to pass around"), shared)
-        left.setFixedWidth(260)
-        body.addWidget(left)
 
+        # Radio buttons rather than a combo box, as the vendor draws
+        # them: all three policies are worth seeing at once, because
+        # choosing one is part of setting up the recording.
+        # The number box first: checking a radio below tells the policy
+        # handler to enable or grey it, and it has to exist by then.
+        self.delay_ms = _spin(10)
+        self.policies = {name: _radio(name) for name in POLICIES}
+        self._policy_group = QButtonGroup(self)
+        for radio in self.policies.values():
+            self._policy_group.addButton(radio)
+            radio.toggled.connect(self._policy_changed)
+        self.policies[KEEP_DELAYS].setChecked(True)
+        fixed_row = QHBoxLayout()
+        fixed_row.addWidget(self.policies[ONE_DELAY])
+        fixed_row.addWidget(self.delay_ms)
+        fixed_row.addWidget(caption("ms"))
+        fixed_row.addStretch()
+        record_row = QHBoxLayout()
+        record_row.addWidget(primary_button("Record…", self._record))
+        record_row.addStretch()
+
+        middle = _card(
+            caption("Insert event"), self.where, self.kind, value_row,
+            insert_row,
+            caption("Basic commands"), made, kept, shared,
+            caption("Recording: the gaps between keystrokes"),
+            self.policies[KEEP_DELAYS], self.policies[NO_DELAY], fixed_row,
+            record_row,
+        )
+        middle.setFixedWidth(340)
+        body.addWidget(middle)
+
+        # -- the macro record, and the one thing it cannot do -----------
         self.events = _list()
         self.events.currentRowChanged.connect(self._pull)
         # The rows are a number, a word and a name in columns, and a
         # proportional font would let the columns wander.
         self.events.setFont(QFont("monospace"))
 
-        self.kind = _combo(list(KINDS))
-        self.kind.currentIndexChanged.connect(self._kind_changed)
-        self.value = _combo([k.ident for k in kb_layout.KEYS])
-        self.value.setEditable(True)
-        self.ms = _spin(50)
-        event_row = QHBoxLayout()
-        event_row.addWidget(self.kind)
-        event_row.addWidget(self.value, 1)
-        event_row.addWidget(self.ms)
-
-        edit_row = QHBoxLayout()
-        edit_row.addWidget(primary_button("Add event", self._add))
-        edit_row.addWidget(
-            ghost_button("Insert before", lambda: self._insert(False)))
-        edit_row.addWidget(
-            ghost_button("Insert after", lambda: self._insert(True)))
-        edit_row.addWidget(ghost_button("Change", self._replace))
-        edit_row.addStretch()
-
+        # Above the list and to the right, where the vendor's three
+        # icons sit: they act on the row selected in the list below.
+        # Worded rather than drawn, and told apart from the commands in
+        # the middle column -- which delete and reorder macros -- by a
+        # tooltip each, because the words alone are the same words.
         order_row = QHBoxLayout()
-        order_row.addWidget(ghost_button("Remove", self._remove))
-        order_row.addWidget(ghost_button("Up", lambda: self._move(-1)))
-        order_row.addWidget(ghost_button("Down", lambda: self._move(1)))
         order_row.addStretch()
+        for text, what, says in (
+                ("Delete", self._remove, "Delete the selected event"),
+                ("Up", lambda: self._move(-1), "Move it one row up"),
+                ("Down", lambda: self._move(1), "Move it one row down")):
+            button = ghost_button(text, what)
+            button.setToolTip(says)
+            order_row.addWidget(button)
+
         # On the screen and disabled, so the one missing piece has a
         # place rather than being absent without explanation.
         self.send = primary_button("Send to keyboard", self._send)
@@ -415,25 +602,17 @@ class MacroPage(QWidget):
         self.send.setToolTip(
             "Not yet: an event on the wire is a 0x50 marker and two "
             "undecoded bytes. See docs/PROTOCOL.md §8.")
-        order_row.addWidget(self.send)
-
-        self.delay_mode = _combo(list(POLICIES))
-        self.delay_ms = _spin(10)
-        delay_row = QHBoxLayout()
-        delay_row.addWidget(self.delay_mode, 1)
-        delay_row.addWidget(self.delay_ms)
-        record_row = QHBoxLayout()
-        record_row.addWidget(primary_button("Record…", self._record))
-        record_row.addStretch()
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        save_row.addWidget(self.send)
+        save_row.addWidget(primary_button("Save", self._save))
 
         body.addWidget(_card(
-            caption("Events"), self.events,
-            caption("Event"), event_row, edit_row, order_row,
-            caption("Recording: the gaps between keystrokes"),
-            delay_row, record_row,
+            caption("Macro record"), order_row, self.events, save_row,
         ), 1)
         outer.addLayout(body, 1)
         self._kind_changed()
+        self._policy_changed()
 
     # -- the scheme file ------------------------------------------------
     def showEvent(self, event) -> None:
@@ -464,13 +643,14 @@ class MacroPage(QWidget):
         else:
             self._show("")
 
-    def _persist(self) -> None:
+    def _persist(self) -> bool:
         """Put the macros back in the scheme and write the file.
 
         Every edit saves. A scheme is a couple of kilobytes and an edit
         is a click, so the write costs nothing against the alternative:
         losing a macro somebody typed out because the window closed
-        without asking this screen for it.
+        without asking this screen for it. Says whether it got there,
+        which is what the Save button reports.
         """
         store = scheme_store.shared()
         store.current.macros = {
@@ -483,6 +663,21 @@ class MacroPage(QWidget):
             # A config directory that cannot be written to should cost
             # the save, not the editing.
             self.status.emit(f"macros not saved: {exc}")
+            return False
+        return True
+
+    def _save(self) -> None:
+        """Write the macros out and say so, as the vendor's save does.
+
+        Every edit here has already saved, so this changes nothing on
+        disk -- but somebody who has just recorded a macro wants to be
+        told it is kept rather than to take it on trust, and if the
+        config directory has gone away this is where they find out.
+        """
+        if self._persist():
+            kept = len(self.macros)
+            self.status.emit(
+                f"{kept} macro{'' if kept == 1 else 's'} saved")
 
     # -- the list of macros ---------------------------------------------
     def _current(self) -> str | None:
@@ -509,15 +704,60 @@ class MacroPage(QWidget):
             n += 1
         return f"{stem} {n}"
 
+    def _adopt(self, name: str, events: list[Event]) -> str:
+        """Put a macro from somewhere else in the list, and keep it.
+
+        Import, duplicate and paste all arrive at this: a free name, a
+        row, a save and the selection. Said once so the three cannot
+        come to disagree about what arriving means.
+        """
+        name = self._free_name(name)
+        self.macros[name] = list(events)
+        self.names.addItem(name)
+        self._persist()
+        self._select(name)
+        return name
+
+    def _names_menu(self, pos) -> None:
+        """The right-click menu, where the vendor's own list has one."""
+        item = self.names.itemAt(pos)
+        if item is not None:
+            # The lower half of the menu is about the macro under the
+            # pointer, which need not be the one already selected.
+            self.names.setCurrentItem(item)
+        self._macro_menu(item is not None).exec(
+            self.names.viewport().mapToGlobal(pos))
+
+    def _macro_menu(self, over_macro: bool) -> QMenu:
+        """What the right-click menu offers; built apart from showing it.
+
+        Blank space gets the vendor's three -- new, import, paste --
+        which are also the only three a list with nothing in it can
+        offer. Over a macro the menu carries that macro's own commands
+        as well, so the buttons in the middle column are a second way
+        rather than the only one.
+        """
+        menu = _menu(self)
+        menu.addAction("New", self._new)
+        menu.addAction("Import…", self._import)
+        paste = menu.addAction("Paste", self._paste)
+        # Disabled rather than hidden: a menu that changes shape is one
+        # nobody learns the shape of.
+        paste.setEnabled(_copied is not None)
+        if over_macro:
+            menu.addSeparator()
+            menu.addAction("Copy", self._copy)
+            menu.addAction("Duplicate", self._duplicate)
+            menu.addAction("Rename", self._rename)
+            menu.addAction("Export…", self._export)
+            menu.addAction("Delete", self._delete)
+        return menu
+
     def _new(self) -> None:
         name, ok = QInputDialog.getText(self, "New macro", "Name")
         if not ok or not name:
             return
-        name = self._free_name(name)
-        self.macros[name] = []
-        self.names.addItem(name)
-        self._persist()
-        self._select(name)
+        self._adopt(name, [])
 
     def _rename(self) -> None:
         old = self._current()
@@ -541,14 +781,34 @@ class MacroPage(QWidget):
         name = self._current()
         if not name:
             return
-        copy = self._free_name(f"{name} copy")
         # A shallow copy is a whole one: an Event is immutable, so the
         # two macros can share events without sharing a future.
-        self.macros[copy] = list(self.macros[name])
-        self.names.addItem(copy)
-        self._persist()
-        self._select(copy)
+        copy = self._adopt(f"{name} copy", self.macros[name])
         self.status.emit(f"duplicated as '{copy}'")
+
+    def _copy(self) -> None:
+        """Take a copy of the selected macro, for a later Paste.
+
+        The vendor's basic commands have a copy and its list's menu has
+        a paste, which is the pair: Duplicate is the two in one step
+        and cannot leave the scheme it is in, while this can.
+        """
+        global _copied
+        name = self._current()
+        if not name:
+            self.status.emit("pick a macro to copy")
+            return
+        _copied = (name, list(self.macros[name]))
+        self.status.emit(f"copied '{name}'")
+
+    def _paste(self) -> None:
+        """Put the copied macro in this list, under a free name."""
+        if _copied is None:
+            self.status.emit("nothing has been copied")
+            return
+        name, events = _copied
+        self.status.emit(
+            f"pasted {len(events)} events as '{self._adopt(name, events)}'")
 
     def _delete(self) -> None:
         name = self._current()
@@ -568,15 +828,24 @@ class MacroPage(QWidget):
     def _kind_changed(self) -> None:
         """Offer what the chosen kind can take, and nothing else."""
         kind = self.kind.currentText()
-        keys = kind != MOUSE
-        if keys != self._value_holds_keys:
-            self._value_holds_keys = keys
+        offered = value_choices(kind)
+        if offered != self._offered:
+            self._offered = offered
             self.value.clear()
-            self.value.addItems(
-                [k.ident for k in kb_layout.KEYS] if keys
-                else list(MOUSE_BUTTONS))
+            self.value.addItems(offered)
         self.value.setEnabled(kind != DELAY)
         self.ms.setEnabled(kind == DELAY)
+
+    def _policy_changed(self) -> None:
+        """Only one of the three policies has a number to set."""
+        self.delay_ms.setEnabled(self.policies[ONE_DELAY].isChecked())
+
+    def _policy(self) -> str:
+        """Which of the three the radio buttons are saying."""
+        for name, radio in self.policies.items():
+            if radio.isChecked():
+                return name
+        return KEEP_DELAYS
 
     def _staged(self) -> Event:
         """The event the controls are describing."""
@@ -612,6 +881,16 @@ class MacroPage(QWidget):
         self._persist()
         self._show(name)
         self.events.setCurrentRow(len(self.macros[name]) - 1)
+
+    def _insert_here(self) -> None:
+        """Insert where the panel's dropdown says, which is its point.
+
+        The vendor's panel is a dropdown and one button rather than a
+        button each, and the dropdown is the thing that remembers: a
+        run of events inserted after one another is one choice made
+        once, then Insert, Insert, Insert.
+        """
+        self._insert(self.where.currentText() == INSERT_AFTER)
 
     def _insert(self, after: bool) -> None:
         """Put the staged event either side of the selected one.
@@ -671,8 +950,7 @@ class MacroPage(QWidget):
         if not dialog.exec():
             self.status.emit("recording discarded")
             return
-        events = dialog.events(
-            self.delay_mode.currentText(), self.delay_ms.value())
+        events = dialog.events(self._policy(), self.delay_ms.value())
         if not events:
             self.status.emit("nothing was typed")
             return
@@ -712,11 +990,7 @@ class MacroPage(QWidget):
             QMessageBox.warning(
                 self, "Import", f"That is not a macro file: {exc}")
             return
-        name = self._free_name(name or Path(path).stem)
-        self.macros[name] = events
-        self.names.addItem(name)
-        self._persist()
-        self._select(name)
+        name = self._adopt(name or Path(path).stem, events)
         self.status.emit(f"imported {len(events)} events as '{name}'")
 
     def _send(self) -> None:

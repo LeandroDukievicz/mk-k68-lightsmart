@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -26,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QEvent, Qt
-    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
     from PySide6.QtWidgets import QApplication
 except ImportError:                                   # pragma: no cover
     QApplication = None
@@ -88,6 +89,43 @@ class TheEventModel(unittest.TestCase):
                          ["press", "release", "wait", "mouse"])
         self.assertIn("40 ms", labels[2])
 
+    def test_a_click_reads_apart_from_the_two_halves_of_one(self):
+        # The recorder writes the pair, because a button held down
+        # across a delay is something a macro can mean and one event
+        # could not say it.
+        self.assertEqual(macro.Event(macro.MOUSE, "Left").label(),
+                         "mouse    Left")
+        self.assertIn("Left down",
+                      macro.Event(macro.MOUSE_DOWN, "Left").label())
+        self.assertIn("Left up",
+                      macro.Event(macro.MOUSE_UP, "Left").label())
+        self.assertTrue(
+            macro.Event(macro.WHEEL, "Up").label().startswith("wheel"))
+
+    def test_each_kind_offers_only_the_values_it_can_take(self):
+        self.assertEqual(macro.value_choices(macro.MOUSE_DOWN),
+                         list(macro.MOUSE_BUTTONS))
+        self.assertEqual(macro.value_choices(macro.WHEEL),
+                         list(macro.WHEEL_WAYS))
+        self.assertIn("A", macro.value_choices(macro.KEY_DOWN))
+
+    def test_a_mouse_button_is_named_as_the_value_list_names_it(self):
+        self.assertEqual(macro.mouse_name(Qt.LeftButton), "Left")
+        self.assertEqual(macro.mouse_name(Qt.MiddleButton), "Middle")
+        # The names the recorder writes are the names the editor
+        # offers, or an event would be recorded that nobody could edit.
+        self.assertEqual([macro.mouse_name(b) for b in macro.MOUSE_BY_BUTTON],
+                         list(macro.MOUSE_BUTTONS))
+        self.assertEqual(macro.mouse_name(Qt.BackButton), "")
+
+    def test_the_kinds_already_saved_keep_the_places_they_had(self):
+        # The scheme file holds these strings, and a screen reads an
+        # event back by looking its kind up in this tuple, so a kind
+        # added anywhere but the end would orphan saved macros.
+        self.assertEqual(macro.KINDS[:4],
+                         ("Key down", "Key up", "Delay (ms)",
+                          "Mouse button"))
+
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed")
 class TheDelayPolicies(unittest.TestCase):
@@ -146,6 +184,29 @@ class TheRecorder(unittest.TestCase):
         else:
             self.dialog.keyPressEvent(event)
 
+    def click(self, button, release=False):
+        """A click on the dialog's own body, which Qt hands to it.
+
+        A click on Stop or Discard never arrives here: the button under
+        the pointer takes it, which is what leaves the pair of them
+        working while the rest of the dialog records the mouse.
+        """
+        kind = (QEvent.MouseButtonRelease if release
+                else QEvent.MouseButtonPress)
+        event = QMouseEvent(kind, QPointF(8, 8), QPointF(8, 8), button,
+                            Qt.NoButton if release else button,
+                            Qt.NoModifier)
+        if release:
+            self.dialog.mouseReleaseEvent(event)
+        else:
+            self.dialog.mousePressEvent(event)
+
+    def wheel(self, notches):
+        self.dialog.wheelEvent(QWheelEvent(
+            QPointF(8, 8), QPointF(8, 8), QPoint(0, 0),
+            QPoint(0, 120 * notches), Qt.NoButton, Qt.NoModifier,
+            Qt.NoScrollPhase, False))
+
     def test_a_press_and_a_release_are_both_recorded(self):
         self.press(Qt.Key_A, "a")
         self.press(Qt.Key_A, "a", release=True)
@@ -171,6 +232,46 @@ class TheRecorder(unittest.TestCase):
         events = self.dialog.events(macro.NO_DELAY, 10)
         self.assertEqual([e.kind for e in events],
                          ["Key down", "Key up"])
+
+    def test_a_mouse_button_is_recorded_as_a_press_and_a_release(self):
+        self.click(Qt.LeftButton)
+        self.click(Qt.LeftButton, release=True)
+        self.assertEqual([(kind, value)
+                          for _, kind, value in self.dialog.stamps],
+                         [("Mouse down", "Left"), ("Mouse up", "Left")])
+
+    def test_a_button_this_screen_cannot_name_is_not_recorded(self):
+        # Back, forward, the ones down the side of a gaming mouse: the
+        # value list cannot offer them, so nobody could edit one.
+        self.click(Qt.BackButton)
+        self.assertEqual(self.dialog.stamps, [])
+
+    def test_the_wheel_is_recorded_with_the_way_it_turned(self):
+        self.wheel(1)
+        self.wheel(-1)
+        self.assertEqual([value for _, _, value in self.dialog.stamps],
+                         ["Up", "Down"])
+        self.assertEqual({kind for _, kind, _ in self.dialog.stamps},
+                         {macro.WHEEL})
+
+    def test_the_pointer_moving_about_is_not_an_event(self):
+        # A macro of this board's carries no coordinates, and the
+        # clicks would be buried under the travel between them.
+        self.dialog.mouseMoveEvent(QMouseEvent(
+            QEvent.MouseMove, QPointF(9, 9), QPointF(9, 9), Qt.NoButton,
+            Qt.LeftButton, Qt.NoModifier))
+        self.assertEqual(self.dialog.stamps, [])
+
+    def test_the_keyboard_and_the_mouse_are_one_recording(self):
+        self.press(Qt.Key_A, "a")
+        self.click(Qt.LeftButton)
+        self.press(Qt.Key_A, "a", release=True)
+        self.assertEqual([kind for _, kind, _ in self.dialog.stamps],
+                         ["Key down", "Mouse down", "Key up"])
+        # And a mouse event is spaced by the delay policy like any
+        # other: the policies look at the stamps, not at the kinds.
+        kinds = [e.kind for e in self.dialog.events(macro.ONE_DELAY, 7)]
+        self.assertEqual(kinds.count(macro.DELAY), 2)
 
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed")
@@ -312,11 +413,68 @@ class Editing(ThroughTheSchemeFile):
         self.assertEqual(self.page.kind.currentText(), macro.DELAY)
         self.assertEqual(self.page.ms.value(), 10)
 
+    def offered(self) -> list[str]:
+        return [self.page.value.itemText(i)
+                for i in range(self.page.value.count())]
+
     def test_a_mouse_event_is_offered_buttons_and_not_keys(self):
         self.page.kind.setCurrentIndex(macro.KINDS.index(macro.MOUSE))
-        offered = [self.page.value.itemText(i)
-                   for i in range(self.page.value.count())]
-        self.assertEqual(offered, list(macro.MOUSE_BUTTONS))
+        self.assertEqual(self.offered(), list(macro.MOUSE_BUTTONS))
+
+    def test_a_wheel_event_is_offered_the_two_ways_round(self):
+        self.page.kind.setCurrentIndex(macro.KINDS.index(macro.WHEEL))
+        self.assertEqual(self.offered(), list(macro.WHEEL_WAYS))
+
+    def test_every_kind_of_event_can_be_staged(self):
+        self.assertEqual([self.page.kind.itemText(i)
+                          for i in range(self.page.kind.count())],
+                         list(macro.KINDS))
+
+    def test_a_delay_greys_the_value_and_a_key_greys_the_number(self):
+        self.page.kind.setCurrentIndex(macro.KINDS.index(macro.DELAY))
+        self.assertFalse(self.page.value.isEnabled())
+        self.assertTrue(self.page.ms.isEnabled())
+        self.page.kind.setCurrentIndex(macro.KINDS.index(macro.KEY_DOWN))
+        self.assertTrue(self.page.value.isEnabled())
+        self.assertFalse(self.page.ms.isEnabled())
+
+    def test_a_mouse_event_is_inserted_and_kept_like_any_other(self):
+        self.page.events.setCurrentRow(0)
+        self.stage("Right", macro.MOUSE_DOWN)
+        self.page._insert(True)
+        self.assertEqual(self.saved("Login")[1],
+                         {"kind": "Mouse down", "value": "Right"})
+
+    def test_the_panel_opens_on_insert_before(self):
+        # Which is where the vendor's dropdown opens, and the button
+        # under it means whatever the dropdown last said.
+        self.assertEqual(self.page.where.currentText(), macro.INSERT_BEFORE)
+        self.page.events.setCurrentRow(1)
+        self.stage("B")
+        self.page._insert_here()
+        self.assertEqual(self.page.macros["Login"][1].value, "B")
+
+    def test_the_panel_inserts_after_when_the_dropdown_says_so(self):
+        self.page.where.setCurrentIndex(
+            macro.PLACES.index(macro.INSERT_AFTER))
+        self.page.events.setCurrentRow(1)
+        self.stage("B")
+        self.page._insert_here()
+        self.assertEqual(self.page.macros["Login"][2],
+                         macro.Event(macro.KEY_DOWN, "B"))
+
+    def test_the_dropdown_is_still_saying_it_on_the_next_insert(self):
+        # The point of a dropdown rather than a button each: a run of
+        # events is one choice made once, then Insert, Insert, Insert.
+        self.page.where.setCurrentIndex(
+            macro.PLACES.index(macro.INSERT_AFTER))
+        self.page.events.setCurrentRow(0)
+        self.stage("B")
+        self.page._insert_here()
+        self.stage("C")
+        self.page._insert_here()
+        self.assertEqual([e.value for e in self.page.macros["Login"]],
+                         ["A", "B", "C", "10", "A"])
 
     def test_removing_an_event_closes_the_gap(self):
         self.page.events.setCurrentRow(1)
@@ -359,6 +517,289 @@ class Editing(ThroughTheSchemeFile):
 
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class CopyAndPaste(ThroughTheSchemeFile):
+    """The pair behind the vendor's copy button and its list's menu."""
+
+    def setUp(self):
+        super().setUp()
+        # The copy is kept on the module so that it outlives a screen
+        # and crosses between schemes, which also means a test that
+        # left one behind would be felt by the next.
+        self.previous_copy = macro._copied
+        macro._copied = None
+        self.said: list[str] = []
+        self.page.status.connect(self.said.append)
+        self.make("Login", [macro.Event(macro.KEY_DOWN, "A"),
+                            macro.Event.delay(10)])
+
+    def tearDown(self):
+        macro._copied = self.previous_copy
+        super().tearDown()
+
+    def test_a_copied_macro_pastes_in_under_a_free_name(self):
+        self.page._copy()
+        self.page._paste()
+        self.assertEqual(list(self.page.macros), ["Login", "Login 2"])
+        self.assertEqual(self.page.macros["Login 2"],
+                         self.page.macros["Login"])
+        self.assertIn("Login 2", store.Store.load(self.path).current.macros)
+
+    def test_pasting_twice_makes_two_macros_and_not_one(self):
+        self.page._copy()
+        self.page._paste()
+        self.page._paste()
+        self.assertEqual(list(self.page.macros),
+                         ["Login", "Login 2", "Login 3"])
+
+    def test_a_pasted_macro_has_a_list_of_its_own(self):
+        self.page._copy()
+        self.page._paste()
+        self.page.macros["Login 2"].append(macro.Event.delay(1))
+        self.assertEqual(len(self.page.macros["Login"]), 2)
+
+    def test_what_is_pasted_is_what_was_copied_at_the_time(self):
+        # The copy is taken by Copy, not read out of the macro again at
+        # Paste: the one it came from can have been edited since, or
+        # renamed, or deleted.
+        self.page._copy()
+        self.page.macros["Login"].append(macro.Event.delay(99))
+        self.page._paste()
+        self.assertEqual(len(self.page.macros["Login 2"]), 2)
+
+    def test_a_copy_crosses_from_one_scheme_to_another(self):
+        # Which is the whole of what Paste can do that Duplicate
+        # cannot: Duplicate is the copy and the paste in one step, and
+        # both of them land in the scheme being looked at.
+        self.page._copy()
+        store.shared().add("Work")
+        store.shared().active = 1
+        self.page._load()
+        self.page._paste()
+        self.assertEqual(list(self.page.macros), ["Login"])
+        self.assertEqual(self.page.macros["Login"][0].value, "A")
+
+    def test_pasting_with_nothing_copied_says_so(self):
+        self.page._paste()
+        self.assertEqual(self.said, ["nothing has been copied"])
+        self.assertEqual(list(self.page.macros), ["Login"])
+
+    def test_copying_nothing_says_so_rather_than_failing(self):
+        self.page.names.setCurrentRow(-1)
+        self.page.names.clearSelection()
+        self.page._copy()
+        self.assertEqual(self.said, ["pick a macro to copy"])
+
+    def test_the_blank_space_menu_is_the_vendors_three(self):
+        self.assertEqual([a.text() for a in self.page._macro_menu(False)
+                          .actions()],
+                         ["New", "Import…", "Paste"])
+
+    def test_the_menu_over_a_macro_carries_its_own_commands_too(self):
+        texts = [a.text() for a in self.page._macro_menu(True).actions()]
+        self.assertEqual(texts[:3], ["New", "Import…", "Paste"])
+        for command in ("Copy", "Duplicate", "Rename", "Export…", "Delete"):
+            self.assertIn(command, texts)
+
+    def test_paste_is_greyed_until_something_has_been_copied(self):
+        def paste_of(menu):
+            return next(a for a in menu.actions() if a.text() == "Paste")
+
+        self.assertFalse(paste_of(self.page._macro_menu(False)).isEnabled())
+        self.page._copy()
+        self.assertTrue(paste_of(self.page._macro_menu(False)).isEnabled())
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class TheRecordPolicy(ThroughTheSchemeFile):
+    """The three radios, the fixed delay beside them, and Record."""
+
+    class FakeRecorder:
+        """Stands in for the dialog, which a test cannot drive.
+
+        The real one is modal and holds the keyboard; what matters on
+        this side of it is that the screen asks it for the policy the
+        radios are showing and keeps what comes back.
+        """
+
+        made: list["TheRecordPolicy.FakeRecorder"] = []
+        answer = True
+
+        def __init__(self, parent=None):
+            TheRecordPolicy.FakeRecorder.made.append(self)
+            self.asked = None
+
+        def exec(self):
+            return TheRecordPolicy.FakeRecorder.answer
+
+        def events(self, policy, fixed_ms):
+            self.asked = (policy, fixed_ms)
+            return [macro.Event(macro.KEY_DOWN, "Z")]
+
+    def setUp(self):
+        super().setUp()
+        self.said: list[str] = []
+        self.page.status.connect(self.said.append)
+        self.FakeRecorder.made = []
+        self.FakeRecorder.answer = True
+        self.make("Login", [macro.Event(macro.KEY_DOWN, "A")])
+
+    def recording(self):
+        """Put the stand-in dialog in the real one's place."""
+        return unittest.mock.patch.object(
+            macro, "RecordDialog", self.FakeRecorder)
+
+    def test_recording_keeps_the_real_delays_until_told_otherwise(self):
+        self.assertEqual(self.page._policy(), macro.KEEP_DELAYS)
+        self.assertTrue(self.page.policies[macro.KEEP_DELAYS].isChecked())
+
+    def test_the_fixed_delay_starts_at_the_vendors_ten_milliseconds(self):
+        self.assertEqual(self.page.delay_ms.value(), 10)
+
+    def test_the_fixed_delay_is_greyed_until_it_is_the_one_in_use(self):
+        self.assertFalse(self.page.delay_ms.isEnabled())
+        self.page.policies[macro.ONE_DELAY].setChecked(True)
+        self.assertTrue(self.page.delay_ms.isEnabled())
+        self.page.policies[macro.NO_DELAY].setChecked(True)
+        self.assertFalse(self.page.delay_ms.isEnabled())
+
+    def test_the_radios_are_one_choice_and_not_three(self):
+        for name in macro.POLICIES:
+            self.page.policies[name].setChecked(True)
+            self.assertEqual(self.page._policy(), name)
+            self.assertEqual(
+                [n for n in macro.POLICIES
+                 if self.page.policies[n].isChecked()], [name])
+
+    def test_recording_is_told_what_the_radios_say(self):
+        self.page.policies[macro.ONE_DELAY].setChecked(True)
+        self.page.delay_ms.setValue(25)
+        with self.recording():
+            self.page._record()
+        self.assertEqual(self.FakeRecorder.made[0].asked,
+                         (macro.ONE_DELAY, 25))
+
+    def test_a_recording_replaces_the_macro_and_is_saved(self):
+        with self.recording():
+            self.page._record()
+        self.assertEqual(self.saved("Login"),
+                         [{"kind": "Key down", "value": "Z"}])
+        self.assertEqual(self.page.events.count(), 1)
+
+    def test_a_discarded_recording_leaves_the_macro_alone(self):
+        self.FakeRecorder.answer = False
+        with self.recording():
+            self.page._record()
+        self.assertEqual(self.page.macros["Login"],
+                         [macro.Event(macro.KEY_DOWN, "A")])
+        self.assertEqual(self.said, ["recording discarded"])
+
+    def test_recording_into_no_macro_says_so_rather_than_failing(self):
+        self.page.names.setCurrentRow(-1)
+        self.page.names.clearSelection()
+        with self.recording():
+            self.page._record()
+        self.assertEqual(self.said, ["make a macro first"])
+        self.assertEqual(self.FakeRecorder.made, [])
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class Saving(ThroughTheSchemeFile):
+    """The vendor's save button, over a screen that saves anyway."""
+
+    def setUp(self):
+        super().setUp()
+        self.said: list[str] = []
+        self.page.status.connect(self.said.append)
+
+    def test_saving_says_what_was_kept(self):
+        self.make("Login", [macro.Event(macro.KEY_DOWN, "A")])
+        self.said.clear()
+        self.page._save()
+        self.assertEqual(self.said, ["1 macro saved"])
+        self.assertIn("Login", store.Store.load(self.path).current.macros)
+
+    def test_saving_counts_them_all(self):
+        self.make("Login")
+        self.make("Spare")
+        self.page._save()
+        self.assertEqual(self.said[-1], "2 macros saved")
+
+    def test_a_file_that_cannot_be_written_is_said_and_not_swallowed(self):
+        def refuse():
+            raise OSError("read-only file system")
+
+        self.make("Login")
+        store.shared().save = refuse
+        self.said.clear()
+        self.page._save()
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("macros not saved", self.said[0])
+
+    def test_an_edit_that_cannot_be_saved_still_says_so(self):
+        # Every edit saves, so the warning belongs to the edit as well
+        # as to the button: the editing goes on, the file does not.
+        def refuse():
+            raise OSError("read-only file system")
+
+        self.make("Login", [])
+        store.shared().save = refuse
+        self.said.clear()
+        self.page._add()
+        self.assertEqual(len(self.page.macros["Login"]), 1)
+        self.assertIn("macros not saved", self.said[0])
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class FilesOnTheScreen(ThroughTheSchemeFile):
+    """Import and export as the buttons do them, dialog and all."""
+
+    def setUp(self):
+        super().setUp()
+        self.said: list[str] = []
+        self.page.status.connect(self.said.append)
+        self.file = Path(self.dir.name) / "shared.json"
+
+    def choosing(self, which: str):
+        """Answer the file dialog named, with this test's own path."""
+        return unittest.mock.patch.object(
+            macro.QFileDialog, which,
+            staticmethod(lambda *a, **k: (str(self.file), "")))
+
+    def test_an_exported_macro_can_be_imported_back(self):
+        self.make("Login", [macro.Event(macro.KEY_DOWN, "A"),
+                            macro.Event(macro.MOUSE_DOWN, "Left")])
+        with self.choosing("getSaveFileName"):
+            self.page._export()
+        with self.choosing("getOpenFileName"):
+            self.page._import()
+        # Back under a free name rather than over the one it came from.
+        self.assertEqual(self.page.macros["Login 2"],
+                         self.page.macros["Login"])
+        self.assertIn("Login 2", store.Store.load(self.path).current.macros)
+
+    def test_an_imported_macro_is_the_one_being_looked_at(self):
+        macro.write_macro(self.file, "Shared", [macro.Event.delay(40)])
+        with self.choosing("getOpenFileName"):
+            self.page._import()
+        self.assertEqual(self.page._current(), "Shared")
+        self.assertEqual(self.page.events.count(), 1)
+
+    def test_a_file_that_is_not_a_macro_is_refused_and_said(self):
+        self.file.write_text(json.dumps({"schemes": []}))
+        shown: list[str] = []
+        with self.choosing("getOpenFileName"), unittest.mock.patch.object(
+                macro.QMessageBox, "warning",
+                staticmethod(lambda _p, title, *a: shown.append(title))):
+            self.page._import()
+        self.assertEqual(shown, ["Import"])
+        self.assertEqual(self.page.macros, {})
+
+    def test_exporting_nothing_says_so(self):
+        self.page._export()
+        self.assertEqual(self.said, ["pick a macro to export"])
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
 class AsAFile(unittest.TestCase):
     """Export and import, which is how a macro reaches somebody else."""
 
@@ -373,6 +814,13 @@ class AsAFile(unittest.TestCase):
         events = [macro.Event(macro.KEY_DOWN, "A"), macro.Event.delay(40)]
         macro.write_macro(self.path, "Login", events)
         self.assertEqual(macro.read_macro(self.path), ("Login", events))
+
+    def test_a_mouse_event_goes_out_and_comes_back_as_one(self):
+        events = [macro.Event(macro.MOUSE_DOWN, "Left"),
+                  macro.Event(macro.MOUSE_UP, "Left"),
+                  macro.Event(macro.WHEEL, "Down")]
+        macro.write_macro(self.path, "Click", events)
+        self.assertEqual(macro.read_macro(self.path), ("Click", events))
 
     def test_a_bare_list_of_events_is_accepted(self):
         # What a macro looks like inside the scheme file, so pasting one

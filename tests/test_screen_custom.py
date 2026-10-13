@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import QEvent, Qt
-    from PySide6.QtGui import QColor, QMouseEvent
+    from PySide6.QtGui import QColor, QHideEvent, QMouseEvent
     from PySide6.QtWidgets import QApplication
 except ImportError:                                   # pragma: no cover
     QApplication = None
@@ -37,6 +37,7 @@ from mk_k68_lightsmart import store
 
 if QApplication is not None:
     from mk_k68_lightsmart import screens
+    from mk_k68_lightsmart.screens import custom
 
 app = None
 
@@ -306,8 +307,18 @@ class Files(Fixture):
     def test_an_export_names_the_keys_the_way_the_keycaps_do(self):
         self.press("A")
         self.page._export_to(self.file)
-        self.assertEqual(json.loads(self.file.read_text()),
-                         {"version": 1, "keys": {"A": PAINT}})
+        written = json.loads(self.file.read_text())
+        self.assertEqual(written["version"], 1)
+        self.assertEqual(written["keys"], {"A": PAINT})
+
+    def test_an_export_carries_the_effect_and_the_speed(self):
+        # They are half of what this screen sets, so a file that held
+        # only the colours would import back as a different layout.
+        self.press("A")
+        self.page._export_to(self.file)
+        written = json.loads(self.file.read_text())
+        self.assertEqual(written["effect"], self.page.effect().name)
+        self.assertEqual(written["speed"], self.page.speed.value())
 
     def test_an_exported_layout_imports_back(self):
         self.stroke("A", "S")
@@ -387,6 +398,118 @@ class Palette(Fixture):
     def test_the_colour_in_hand_starts_as_the_app_s(self):
         # Nothing picked yet, so the page follows the rest of the app.
         self.assertEqual(self.page._colour().name(), PAINT)
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class TheEffect(Fixture):
+    """Picking an effect, and what Apply then does with it.
+
+    This screen is the vendor's custom lighting, where an effect goes
+    on the keys that were picked rather than on the whole board. No
+    command does that, so the effect is played from the host -- which
+    is the part worth pinning down: which effects run, which are sent
+    once, and which cannot be played at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sent: list[tuple[int, str]] = []
+        self.page.apply_key.connect(
+            lambda i, c: self.sent.append((i, c.name())))
+
+    def pick(self, name: str):
+        """Select an effect by name, the way the list would."""
+        for effect in custom.CUSTOM_EFFECTS:
+            if effect.name == name:
+                self.page._select_effect(effect)
+                return effect
+        raise AssertionError(f"no effect called {name}")
+
+    # -- what the list has in hand --------------------------------------
+    def test_the_effect_in_hand_is_the_row_the_list_has(self):
+        wanted = custom.CUSTOM_EFFECTS[3]
+        self.page._select_effect(wanted)
+        self.assertIs(self.page.effect(), wanted)
+
+    def test_no_row_selected_falls_back_to_the_first(self):
+        self.page.effects.setCurrentRow(-1)
+        self.assertIs(self.page.effect(), custom.CUSTOM_EFFECTS[0])
+
+    # -- the three kinds of effect --------------------------------------
+    def test_a_steady_effect_is_sent_once_and_nothing_runs(self):
+        self.pick("Static")
+        self.press("A")
+        self.page._apply()
+        self.assertEqual([i for i, _ in self.sent],
+                         [self.key("A").light_index])
+        self.assertIsNone(self.page._running)
+
+    def test_an_animated_effect_runs_until_it_is_stopped(self):
+        self.pick("Breath")
+        self.press("A")
+        self.page._apply()
+        self.assertIsNotNone(self.page._running)
+        self.assertTrue(self.page._frames.isActive())
+        self.page._stop_clicked()
+        self.assertIsNone(self.page._running)
+        self.assertFalse(self.page._frames.isActive())
+
+    def test_a_press_reactive_effect_is_refused_with_the_reason(self):
+        # SingleOn lights a key as it is pressed, and the presses go to
+        # whatever has focus, never to this app -- so the host has
+        # nothing to play it from. Refusing beats pretending.
+        self.pick("SingleOn")
+        self.press("A")
+        self.page._apply()
+        self.assertIsNone(self.page._running)
+        self.assertEqual(self.sent, [])
+        self.assertIn("pressed", self.said[-1])
+
+    def test_applying_with_nothing_picked_says_so(self):
+        self.pick("Static")
+        self.page._apply()
+        self.assertEqual(self.sent, [])
+        self.assertIn("nothing painted", self.said[-1])
+
+    # -- what Apply leaves behind ---------------------------------------
+    def test_apply_stores_the_keys_in_the_scheme(self):
+        self.pick("Static")
+        self.stroke("A", "S")
+        self.page._apply()
+        self.page._save_now()
+        self.assertEqual(
+            set(store.shared().current.lighting),
+            {self.key("A").light_index, self.key("S").light_index})
+
+    def test_a_second_apply_replaces_the_first_run(self):
+        self.pick("Breath")
+        self.press("A")
+        self.page._apply()
+        first = self.page._running
+        self.pick("Spectrum")
+        self.page._apply()
+        self.assertIsNot(self.page._running, first)
+        self.assertEqual(self.page._running.name, "Spectrum")
+
+    def test_stopping_when_nothing_runs_says_so(self):
+        self.page._stop_clicked()
+        self.assertIn("nothing is running", self.said[-1])
+
+    def test_a_running_effect_stops_when_the_screen_goes_away(self):
+        # It drives the keyboard on a timer; leaving that running
+        # behind a screen nobody is looking at would keep the wire busy.
+        self.pick("Breath")
+        self.press("A")
+        self.page._apply()
+        self.page.hideEvent(QHideEvent())
+        self.assertIsNone(self.page._running)
+
+    # -- the speed knob --------------------------------------------------
+    def test_a_higher_speed_turns_the_phase_faster(self):
+        self.page.speed.setValue(self.page.speed.minimum())
+        slow = self.page._step()
+        self.page.speed.setValue(self.page.speed.maximum())
+        self.assertGreater(self.page._step(), slow)
 
 
 if __name__ == "__main__":

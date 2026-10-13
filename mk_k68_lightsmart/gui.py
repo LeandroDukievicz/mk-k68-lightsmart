@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetricsF,
     QLinearGradient,
     QPainter,
     QPen,
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -141,6 +143,16 @@ class KeyboardView(QWidget):
         super().__init__(parent)
         self.colours: dict[int, QColor] = {}
         self.selected: kb_layout.Key | None = None
+        #: Light indices picked out as a group, drawn with a ring around
+        #: the keycap. The vendor's user and custom lighting screens both
+        #: select many keys at once -- "select all" takes the whole board
+        #: -- and then apply one colour or effect to the lot, so a single
+        #: ``selected`` key is not enough to show what an apply will hit.
+        self.chosen: set[int] = set()
+        #: Optional ``key -> str`` for the tooltip, which the remap screen
+        #: uses to show a key's default and current function the way the
+        #: vendor's hover panel does. Left unset, keys carry no tooltip.
+        self.hover_text = None
         w, _ = kb_layout.CANVAS_SIZE
         # Crop to what the keys actually occupy, with a small margin. The
         # strip is drawn separately above; a fixed crop used to cut the
@@ -160,6 +172,16 @@ class KeyboardView(QWidget):
         }
         self._font = QFont()
         self._font.setPointSizeF(7.5)
+        # A label wider than its keycap is drawn centred and clipped by
+        # the rect, which shows the middle of the word and reads as a
+        # glitch -- SWITCH is 18px wide and came out as "VITC". Elide
+        # instead, once, and let the tooltip carry the full name.
+        metrics = QFontMetricsF(self._font)
+        self._labels: dict[int, str] = {
+            k.light_index: metrics.elidedText(
+                k.name, Qt.ElideRight, self._rects[k.light_index].width() - 4)
+            for k in kb_layout.KEYS
+        }
 
     def key_at(self, pos: QPointF) -> kb_layout.Key | None:
         for key in kb_layout.KEYS:
@@ -196,14 +218,24 @@ class KeyboardView(QWidget):
                 p.setPen(QPen(edge, 1))
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4)
 
+            # The group ring sits outside the keycap rather than
+            # replacing its edge, so a chosen key still shows the colour
+            # it carries -- which is the point of picking it.
+            if key.light_index in self.chosen:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(ACCENT, 1.5))
+                p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 5, 5)
+
             p.setPen(label)
-            p.drawText(r, Qt.AlignCenter, key.name)
+            p.drawText(r, Qt.AlignCenter, self._labels[key.light_index])
 
     def mouseMoveEvent(self, event) -> None:
         hit = self.key_at(event.position())
         if hit is not self._hover:
             self._hover = hit
             self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor)
+            if self.hover_text is not None:
+                self.setToolTip(self.hover_text(hit) if hit else "")
             self.update()
 
     def leaveEvent(self, event) -> None:
@@ -1037,9 +1069,18 @@ class MainWindow(QMainWindow):
         ("░", "Matrix"),
     ]
 
+    #: The chrome around the pages, which the opening size has to add
+    #: back: the stack reports only what a page needs.
+    SIDEBAR_WIDTH = 50
+    TOPBAR_HEIGHT = 56
+    STATUSBAR_ALLOWANCE = 30
+    SCROLLBAR_ALLOWANCE = 16
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MK-K68-LightSmart")
+        # A starting point only; _open_at_a_size_that_fits has the last
+        # word once the pages exist and can be measured.
         self.resize(1268, 620)
         self.colour = QColor("#ff0000")
         # The keyboard is 140 ms per key and minutes per animation, so it
@@ -1087,6 +1128,7 @@ class MainWindow(QMainWindow):
         self.custom_page = screens.CustomPage(lambda: self.colour)
         self.custom_page.status.connect(self.set_status)
         self.custom_page.apply_key.connect(self.on_custom_key)
+        self.custom_page.scheme_changed.connect(self.on_scheme_changed)
 
         self.macro_page = screens.MacroPage()
         self.macro_page.status.connect(self.set_status)
@@ -1099,12 +1141,16 @@ class MainWindow(QMainWindow):
         # it on the hardware.
         self.profiles_page.replay_requested.connect(self.replay_scheme)
         self.profiles_page.scheme_changed.connect(self.on_scheme_changed)
+        # The user-lighting screen paints keys like the custom one does,
+        # and the worker coalesces them per key either way.
+        self.profiles_page.apply_key.connect(self.on_custom_key)
 
         self.music_page = screens.MusicPage()
         self.music_page.status.connect(self.set_status)
         # The same handler as the custom screen: both are painting
         # keys, and the worker coalesces them per key either way.
         self.music_page.apply_key.connect(self.on_custom_key)
+        self.music_page.scheme_changed.connect(self.on_scheme_changed)
 
         # The rail's sections, in its order. Every one has a screen now.
         built = {0: self._build_home(), 1: self.keys_page,
@@ -1118,14 +1164,68 @@ class MainWindow(QMainWindow):
         self.setup_page.look_again.connect(self.reconnect)
         self.setup_page.status.connect(self.set_status)
         self.pages.addWidget(self.setup_page)
-        body.addWidget(self.pages, 1)
+        # The pages scroll rather than being squeezed. A Qt layout given
+        # less height than it asks for does not refuse: it lays the next
+        # widget over the one before, which on the music screen put the
+        # "Levels" caption across the bottom row of keys. Which screen
+        # overflows depends on the window, and the window's own minimum
+        # follows whichever page is up, so pinning a height just moves
+        # the problem between screens. A viewport that scrolls ends it
+        # for all of them, at any window size.
+        scroller = QScrollArea()
+        scroller.setWidget(self.pages)
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.NoFrame)
+        scroller.setStyleSheet("QScrollArea { background: transparent; }")
+        # Both axes, because the stack holds every page at the widest
+        # page's minimum -- the custom screen's 1391px, scheme list and
+        # effect list and board and colour panel across -- and a window
+        # narrower than that would otherwise clip the right-hand edge
+        # with no way to reach it. Turning the bar off does not make the
+        # room; it only hides that the room is missing.
+        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        body.addWidget(scroller, 1)
         outer.addLayout(body, 1)
 
         outer.addWidget(statusbar)
 
+        self._open_at_a_size_that_fits()
+
         self._wire_device()
         self.set_status("looking for the keyboard…")
         self.device.start()
+
+    def _open_at_a_size_that_fits(self) -> None:
+        """Size the window to the rail's widest screen, within the display.
+
+        Before the pages scrolled, Qt refused any window smaller than
+        the widest one and silently grew it. Now that they scroll it
+        obeys, so a default narrower than the content would open with
+        bars already showing and nothing to tell the user why. Ask the
+        layout what it wants, and give it that much where the screen
+        allows -- where it does not, the scroll area is the answer.
+        """
+        # Asked of the window, the answer would be the scroll area's own
+        # modest hint: a thing that scrolls does not demand the size of
+        # what is inside it. Asked of the stack, it is whichever page
+        # happens to be up. So ask every page and take the largest, in
+        # each axis separately -- the widest screen and the tallest are
+        # not the same one.
+        pages = [self.pages.widget(i) for i in range(self.pages.count())]
+        hints = [p.sizeHint() for p in pages if p is not None]
+        width = max((h.width() for h in hints), default=1268)
+        height = max((h.height() for h in hints), default=620)
+        width += self.SIDEBAR_WIDTH + self.SCROLLBAR_ALLOWANCE
+        height += (self.TOPBAR_HEIGHT + self.STATUSBAR_ALLOWANCE
+                   + self.SCROLLBAR_ALLOWANCE)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            # A margin, so the window is not flush against the panels a
+            # desktop puts at the edges of its "available" area.
+            width = min(width, room.width() - 40)
+            height = min(height, room.height() - 60)
+        self.resize(max(width, 900), max(height, 560))
 
     # -- chrome ---------------------------------------------------------
     def _build_topbar(self) -> QWidget:
@@ -1166,7 +1266,7 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
-        side.setFixedWidth(50)
+        side.setFixedWidth(self.SIDEBAR_WIDTH)
         side.setStyleSheet(f"background: {SIDEBAR.name()};")
         lay = QVBoxLayout(side)
         lay.setContentsMargins(0, 6, 0, 10)

@@ -44,6 +44,12 @@ of the rail now opens on a screen rather than a placeholder, but they
 do not all reach the keyboard — three of them edit state the protocol
 cannot yet carry, and each says so on its face.
 
+Each screen is modelled on the vendor's own, section by section, from
+the handbook that ships with the Windows driver: the same regions, the
+same controls, in the same order. Where this app's protocol knowledge
+falls short of the vendor's, the control is still there and the screen
+says what it cannot do rather than leaving the section out.
+
 | Area | State |
 |---|---|
 | Device discovery by usage page, re-checked on the open fd | ✅ done |
@@ -54,11 +60,11 @@ cannot yet carry, and each says so on its face.
 | Built-in animations | ✅ 20 mode bytes, confirmed on hardware; parameters still inferred |
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
-| Key remapping | ✅ screen and CLI both write, with the vendor's own default map as the way back; not yet confirmed on hardware |
-| Custom lighting | ✅ paint, drag, erase, group selectors, import/export; the keyboard cannot be made to *remember* a layout, which needs the profile commands |
-| User profiles | ✅ schemes kept here and replayed onto the keyboard, which is what the vendor's own driver does — it has no switch command either |
-| Music-reactive | ✅ records what is playing (`pw-record`, falling back to `parec`) and drives the keys; degrades to a stand-in meter where neither exists |
-| Macros | 🔍 the editor is complete and persists; the send is disabled because an event on the wire is a `0x50` marker and two undecoded bytes |
+| Key remapping | ✅ the vendor's three regions: hover panel, right-click custom-function dialog over its five key types, and the quick-select grid. Writes, with the vendor's own default map as the way back; not yet confirmed on hardware |
+| User lighting | ✅ the vendor's User Light screen: scheme list, select-all / numbers / WASD, colour wheel with its fourteen presets, apply and reset. Confirmed on hardware |
+| Custom lighting | ✅ the vendor's Custom Light screen: an effect per picked key, with colour and animation speed. No command puts an effect on part of the board, so it is played from the host and the screen says so |
+| Music-reactive | ✅ the vendor's four knobs — visualisation mode, amplitude, background mode, background brightness. Records what is playing (`pw-record`, falling back to `parec`); degrades to a stand-in meter where neither exists |
+| Macros | 🔍 the vendor's four regions, including mouse buttons and the wheel, insert-before/after, copy-paste between schemes and the three delay policies. The send is disabled: an event on the wire is a `0x50` marker and two undecoded bytes |
 
 ---
 

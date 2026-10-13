@@ -24,21 +24,25 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QColorDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QMessageBox,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import layout as kb_layout
+from .. import store as scheme_store
 from ..gui import ACCENT, KeyboardView, caption, ghost_button, primary_button
-from .common import _card, _combo, _heading, _note
+from .common import _card, _combo, _heading, _list, _note
 
 try:                                                  # pragma: no cover
     import numpy as _np
@@ -78,15 +82,45 @@ LOW_HZ, HIGH_HZ = 40.0, 12000.0
 #: spends most of the meter on room tone and hiss.
 FLOOR_DB = -62.0
 
-#: Scheme and background orders, as the combo boxes list them.
-GREEN_AMBER_RED, SINGLE_COLOUR, SPECTRUM = 0, 1, 2
-NOTHING, DIM_STATIC, RUNNING_EFFECT = 0, 1, 2
-
 #: The meter's own colours, lifted out so the board and the bars cannot
 #: disagree about what a level looks like.
 METER_GREEN = QColor("#3ddc84")
 METER_AMBER = QColor("#ffc46b")
 METER_RED = QColor("#ff6b6b")
+
+#: The visualisation modes that are ramps, and the three stops of each.
+#: The vendor's visualisation mode dropdown names its modes after their colours
+#: -- the one its manual shows is green/yellow/red, "green/yellow/red" --
+#: so a mode here is a ramp read by level: the colour of a band says how
+#: loud that band is, which is what makes the board a meter rather than
+#: a light show.
+RAMPS = (
+    ("Green / yellow / red", (METER_GREEN, METER_AMBER, METER_RED)),
+    ("Blue / cyan / white",
+     (QColor("#2b6bff"), QColor("#3ddcff"), QColor("#eaf7ff"))),
+    ("Violet / pink / white",
+     (QColor("#7a3dff"), QColor("#ff6bd6"), QColor("#ffe8ff"))),
+    ("Amber / orange / red",
+     (QColor("#ffd166"), QColor("#ff9f1c"), QColor("#ff4d4d"))),
+)
+
+#: Where a ramp leaves one stop for the next. Two thirds of the way up
+#: and then nearly at the top: a band that is merely playing stays on
+#: the first colour, and the last is kept for peaks, which is the only
+#: thing that makes the top of a ramp mean anything.
+RAMP_MID, RAMP_TOP = 0.6, 0.85
+
+#: The dropdown's order: every ramp, and then the two modes that are not
+#: ramps -- one colour whatever the level, and hue by band.
+MODES = tuple(name for name, _ in RAMPS) + ("Single colour", "Spectrum")
+GREEN_AMBER_RED = 0
+SINGLE_COLOUR, SPECTRUM = len(RAMPS), len(RAMPS) + 1
+
+#: What the keys that are not standing in a bar show. "None" is the
+#: vendor's own default (none) and is the honest one on this board: the
+#: per-key path is slow enough that painting a background costs bars.
+BACKGROUNDS = ("None", "Dim static", "The current effect")
+NOTHING, DIM_STATIC, RUNNING_EFFECT = 0, 1, 2
 
 #: One key colour is nine 15 ms transfers -- about 140 ms measured on
 #: hardware -- so the per-key path carries roughly seven keys a second
@@ -474,19 +508,23 @@ def key_brightness(level: float, row: int, rows: int) -> float:
 
 def band_colour(scheme: int, band: int, count: int, level: float,
                 base: QColor) -> QColor:
-    """The hue for one band, under the chosen visualisation scheme."""
+    """The hue for one band, under the chosen visualisation mode."""
     if scheme == SINGLE_COLOUR:
         return QColor(base)
     if scheme == SPECTRUM:
-        # Hue follows the band, not the level. The point of this scheme
+        # Hue follows the band, not the level. The point of this mode
         # is to show *where* the energy is; a level-driven hue would say
         # the same thing as the bar height and hide the spectrum.
         colour = QColor()
         colour.setHsv(int(300 * band / max(count - 1, 1)), 255, 255)
         return colour
-    if level < 0.6:
-        return QColor(METER_GREEN)
-    return QColor(METER_AMBER) if level < 0.85 else QColor(METER_RED)
+    # An index from a stored scheme, or from a combo that has since
+    # lost an entry, is no reason to refuse to draw: the first ramp is
+    # the vendor's own and is what the screen opens on anyway.
+    low, mid, high = RAMPS[scheme if 0 <= scheme < len(RAMPS) else 0][1]
+    if level < RAMP_MID:
+        return QColor(low)
+    return QColor(mid) if level < RAMP_TOP else QColor(high)
 
 
 def dim(colour: QColor, amount: float) -> QColor:
@@ -560,6 +598,30 @@ class LevelBar(QWidget):
                        int(w - 3), int(h), colour)
 
 
+# ----------------------------------------------------------------------
+# 5. Music -- the screen
+# ----------------------------------------------------------------------
+@dataclass
+class MusicSettings:
+    """The four controls the vendor's panel carries, for one scheme.
+
+    They live here and not in ``store`` because a stored scheme has
+    nowhere to put them: ``store.Scheme`` holds a keymap, a painted
+    layout and macros, and nothing a visualiser could use. So these last
+    as long as the app does and no longer, which the screen says on its
+    face rather than leaving someone to find out at the next start.
+
+    The defaults are the ones the controls open on, so a scheme nobody
+    has touched and a scheme that has just been made look the same.
+    """
+
+    mode: int = GREEN_AMBER_RED
+    amplitude: int = 60
+    background: int = NOTHING
+    brightness: int = 20
+    colour: QColor = field(default_factory=lambda: QColor(ACCENT))
+
+
 class MusicPage(QWidget):
     """Sound into per-key colours, with the vendor's own controls.
 
@@ -576,23 +638,42 @@ class MusicPage(QWidget):
     music in broad strokes while the screen follows it exactly, and that
     is a property of the protocol rather than of this screen.
 
-    The controls are the vendor's: a colour scheme for the bars, how
-    much of the range to use, and what the unlit keys do behind them.
+    The screen is laid out as the vendor's Music Rhythm is: the scheme list
+    down the left, the board in the middle as a preview lit by the
+    music, and the panel underneath it in two columns -- a visualisation
+    mode and its amplitude, a background and its brightness.
     """
 
     apply_key = Signal(int, object)          # light_index, QColor
     status = Signal(str)
-
-    SCHEMES = ("Green / yellow / red", "Single colour", "Spectrum")
-    BACKGROUNDS = ("Nothing", "Dim static", "The current effect")
+    #: The scheme the list here has just made the active one. The same
+    #: signal the profiles screen carries, and for the same reason: the
+    #: screens share one store, so a switch changes what every one of
+    #: them is looking at and they have to be told to look again.
+    scheme_changed = Signal(object)
 
     #: 25 ms is a touch faster than the 21 ms frames the recorder
     #: produces, so the drain is always a little ahead of the queue and
     #: the backlog stays at nothing.
     INTERVAL = 25
 
+    #: The board is a preview here, not something to be painted on, and
+    #: the vendor's panel sits underneath it -- at the size the Custom
+    #: screen draws the board there would be no room for the panel.
+    #:
+    #: 0.72 rather than something roomier because this screen is the
+    #: tallest of the rail: two notes, the preview, the meter and a
+    #: two-column panel. At 0.85 the column wanted about 870px, more
+    #: than the window's own minimum of 802, and a layout given less
+    #: than it asks for does not refuse -- it lays the next widget over
+    #: the one before, which put the "Levels" caption across the bottom
+    #: row of keys. Everything below the board is a fixed height, so the
+    #: board is the only part that can give.
+    PREVIEW_SCALE = 0.72
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self.store = scheme_store.shared()
         self._capture: Capture | None = None
         self._smooth = Smoother(BANDS)
         #: What the keyboard has been told, so only changes are re-sent.
@@ -604,6 +685,14 @@ class MusicPage(QWidget):
         self._lit: set[int] = set()
         self._colour = QColor(ACCENT)
         self._edges = band_edges(BANDS)
+        #: Settings per scheme, by name -- see :class:`MusicSettings`.
+        #: Keyed by name rather than by the scheme object because a
+        #: dataclass with ``eq`` is unhashable, so a rename moves the
+        #: entry and a delete drops it.
+        self._settings: dict[str, MusicSettings] = {}
+        #: Whose settings the controls are currently showing, so a
+        #: control that moves writes into the right scheme.
+        self._scheme_name = ""
 
         rows = key_rows()
         self._rows = len(rows)
@@ -614,32 +703,95 @@ class MusicPage(QWidget):
         outer.setContentsMargins(20, 14, 20, 14)
         outer.setSpacing(12)
         outer.addWidget(_heading("Music mode"))
+        # One note rather than two: this is the tallest screen on the
+        # rail, and a second paragraph here pushed the column past what
+        # the window's minimum grants, which a Qt layout answers by
+        # drawing the next widget over the one before.
         outer.addWidget(_note(
             "The listening is local and needs no new command: the host "
             "records its own output and sends colours through the "
             "per-key path the Home screen uses. That path is the limit "
             "— one key is about 140 ms on the wire — so the keyboard "
             "follows the music in broad strokes while the meter and the "
-            "preview follow it exactly."
+            "preview follow it exactly. The manual's conditions hold "
+            "too: wired mode, because the per-key colour command only "
+            "travels over USB, and something actually playing, because "
+            "what is recorded is this machine's own output. The "
+            "keyboard's music rhythm and the dot-matrix strip's own are "
+            "mutually exclusive: only one of the two shows at a time."
         ))
 
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        body.addWidget(self._build_schemes(), 0, Qt.AlignTop)
+
         self.meter = LevelBar()
-        self.board = KeyboardView()
+        self.board = KeyboardView(self.PREVIEW_SCALE)
+        # The board carries no labels of its own for what it is showing,
+        # so the tooltip says which band a key stands in and what is in
+        # that band -- the only way to read a column off the preview.
+        self.board.hover_text = self._band_of
 
-        self.scheme = _combo(list(self.SCHEMES))
-        self.scheme.currentIndexChanged.connect(self._scheme_changed)
-        self.background = _combo(list(self.BACKGROUNDS))
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        # A clock of its own, because the screen can show forty frames a
+        # second and the keyboard cannot take them.
+        self._sender = QTimer(self)
+        self._sender.timeout.connect(self._send)
 
-        self.amplitude = QSlider(Qt.Horizontal)
-        self.amplitude.setRange(1, 100)
-        self.amplitude.setValue(60)
-        self.back_bright = QSlider(Qt.Horizontal)
-        self.back_bright.setRange(0, 100)
-        self.back_bright.setValue(20)
+        # The board is a fixed size and the card is not, so the two are
+        # put in a column of their own between stretches: that centres
+        # the board the way the vendor's preview sits centred, and it
+        # takes the meter to the board's own width, which is what makes
+        # a bar line up with the keys it is driving.
+        stack = QVBoxLayout()
+        stack.setSpacing(9)
+        stack.addWidget(caption("Preview"))
+        stack.addWidget(self.board)
+        stack.addWidget(caption("Levels"))
+        stack.addWidget(self.meter)
+        middle = QHBoxLayout()
+        middle.addStretch()
+        middle.addLayout(stack)
+        middle.addStretch()
 
-        self.swatch = QLabel()
-        self.swatch.setFixedHeight(22)
-        self._show_swatch()
+        centre = QVBoxLayout()
+        centre.setSpacing(12)
+        centre.addWidget(_card(middle))
+        centre.addWidget(self._build_settings())
+        centre.addStretch()
+        body.addLayout(centre, 1)
+
+        outer.addLayout(body, 1)
+        outer.addStretch()
+
+        # Last, because it fills the controls built above from whichever
+        # scheme the store has active.
+        self._refresh_schemes()
+
+    # -- the scheme list ------------------------------------------------
+    def _build_schemes(self):
+        """The list down the left, with the vendor's three buttons.
+
+        Its list is the app's one list of configuration schemes, the
+        same one the profiles screen owns: the vendor draws it on every
+        lighting screen and marks the scheme in use with a dot, so
+        choosing one here is using one, with no second step.
+
+        Starting and stopping is here too, under the list, because the
+        vendor's panel has no such control to copy -- its screen listens
+        the whole time it is open, and a recorder that ran whenever
+        somebody looked at this page is not a thing to do quietly.
+        """
+        self.schemes = _list()
+        self.schemes.currentRowChanged.connect(self._chose)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(primary_button("New", self._add_scheme))
+        row.addWidget(ghost_button("Rename", self._rename_scheme))
+        row.addWidget(ghost_button("Delete", self._delete_scheme))
+        row.addStretch()
 
         self.route = caption("")
         self.route.setWordWrap(True)
@@ -651,36 +803,293 @@ class MusicPage(QWidget):
         actions.addWidget(ghost_button("Stop", self._stop))
         actions.addStretch()
 
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        # A clock of its own, because the screen can show forty frames a
-        # second and the keyboard cannot take them.
-        self._sender = QTimer(self)
-        self._sender.timeout.connect(self._send)
+        kept = caption(
+            "A scheme's name and the rest of its contents are kept in "
+            "the scheme file. The settings on this screen are not: a "
+            "stored scheme has nowhere to put them, so they last until "
+            "the app closes.")
+        # The card is a fixed width, and the shared caption does not
+        # wrap on its own -- without this the sentence is simply cut.
+        kept.setWordWrap(True)
 
-        side = _card(
-            caption("Visualisation"), self.scheme,
-            caption("Colour"), self.swatch,
-            ghost_button("Pick a colour…", self._pick_colour),
-            caption("Amplitude"), self.amplitude,
-            caption("Behind it"), self.background,
-            caption("Background brightness"), self.back_bright,
-            actions, self.route,
+        card = _card(caption("Scheme list"), self.schemes, row, kept,
+                     caption("Listening"), actions, self.route)
+        card.setFixedWidth(280)
+        return card
+
+    def _refresh_schemes(self, select: int | None = None) -> None:
+        """Redraw the list, and show whichever scheme is now in use.
+
+        Rebuilt whole rather than patched, as the profiles screen does
+        it: the list is five rows and the marks move whenever the active
+        scheme does, including when another screen moved it.
+        """
+        row = self.store.active if select is None else select
+        # The rebuild drags the current row through 0 and -1 on its way,
+        # and each of those would read as a choice nobody made.
+        self.schemes.blockSignals(True)
+        self.schemes.clear()
+        for index, scheme in enumerate(self.store.schemes):
+            mark = "●" if index == self.store.active else "○"
+            self.schemes.addItem(f"{mark}  {scheme.name}")
+        self.schemes.setCurrentRow(
+            max(0, min(row, len(self.store.schemes) - 1)))
+        self.schemes.blockSignals(False)
+        self._follow_active()
+
+    def _follow_active(self) -> None:
+        """Put the active scheme's settings into the controls."""
+        name = self.store.current.name
+        if name == self._scheme_name:
+            return
+        self._scheme_name = name
+        self._load_settings(self._settings_of(name))
+
+    def _chose(self, row: int) -> None:
+        """Selecting a scheme is using it, which is the vendor's list."""
+        if not 0 <= row < len(self.store.schemes) or row == self.store.active:
+            return
+        self.store.active = row
+        self._persist()
+        self._refresh_schemes(row)
+        self.status.emit(f"using {self.store.current.name}")
+        self.scheme_changed.emit(self.store.current)
+
+    def _add_scheme(self) -> None:
+        name, ok = QInputDialog.getText(self, "New scheme", "Name")
+        name = name.strip() if ok else ""
+        if not name:
+            return
+        scheme = self.store.add(name)
+        self.store.active = len(self.store.schemes) - 1
+        self._persist()
+        self._refresh_schemes()
+        if scheme.name == name:
+            self.status.emit(f"added {scheme.name}")
+        else:
+            # The store renames round a collision rather than refusing
+            # one, which is right for adding and the wrong thing to do
+            # without saying so.
+            self.status.emit(f"added {scheme.name} — {name} was taken")
+        self.scheme_changed.emit(self.store.current)
+
+    def _rename_scheme(self) -> None:
+        row = self.schemes.currentRow()
+        if not 0 <= row < len(self.store.schemes):
+            return
+        scheme = self.store.schemes[row]
+        name, ok = QInputDialog.getText(
+            self, "Rename", "Name", text=scheme.name)
+        name = name.strip() if ok else ""
+        if not name or name == scheme.name:
+            return
+        if name in [s.name for i, s in enumerate(self.store.schemes)
+                    if i != row]:
+            # Refused rather than renamed round the collision: somebody
+            # typed this name on purpose, so quietly storing a different
+            # one answers a question they did not ask.
+            self.status.emit(f"there is already a scheme called {name}")
+            return
+        was, scheme.name = scheme.name, name
+        held = self._settings.pop(was, None)
+        if held is not None:
+            self._settings[name] = held
+        if self._scheme_name == was:
+            self._scheme_name = name
+        self._persist()
+        self._refresh_schemes(row)
+        self.status.emit(f"renamed to {name}")
+
+    def _delete_scheme(self) -> None:
+        row = self.schemes.currentRow()
+        if not 0 <= row < len(self.store.schemes):
+            return
+        if len(self.store.schemes) <= 1:
+            # The store refuses this as well; refusing it here keeps the
+            # answer in the status bar instead of a dialog to dismiss.
+            self.status.emit("there has to be one scheme")
+            return
+        scheme = self.store.schemes[row]
+        if (scheme.keymap or scheme.lighting or scheme.macros) \
+                and not self._confirm(
+                    "Delete this scheme?",
+                    f"{scheme.name} holds {len(scheme.keymap)} remapped "
+                    f"keys, {len(scheme.lighting)} painted and "
+                    f"{len(scheme.macros)} macros.\n\nThe keyboard keeps "
+                    f"no copy of a scheme, so this is the only one."):
+            return
+        gone = scheme.name
+        self.store.remove(row)
+        self._settings.pop(gone, None)
+        self._persist()
+        self._refresh_schemes()
+        self.status.emit(
+            f"deleted {gone} — now using {self.store.current.name}")
+        self.scheme_changed.emit(self.store.current)
+
+    def _confirm(self, title: str, question: str) -> bool:
+        """Ask before something there is no way back from.
+
+        A method of its own rather than the call written inline, so a
+        test can answer it: an unanswered modal in a test run is a hang,
+        which is worse to read than a failure.
+        """
+        return QMessageBox.question(
+            self, title, question,
+            QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+
+    def _persist(self) -> None:
+        """Write the scheme file, and say so if it will not be written.
+
+        A failed save leaves the change on screen, so the message is the
+        only warning that the next start will not have it.
+        """
+        try:
+            self.store.save()
+        except OSError as exc:
+            self.status.emit(f"could not save the schemes: {exc}")
+
+    def showEvent(self, event) -> None:
+        # Another screen can add, rename or switch a scheme while this
+        # one is out of sight, and the list is the only thing here that
+        # would then be wrong.
+        super().showEvent(event)
+        self._refresh_schemes()
+
+    # -- the settings panel ---------------------------------------------
+    def _build_settings(self):
+        """The vendor's panel: two columns under the preview.
+
+        Left is what the music looks like -- the ramp and how hard the
+        levels are driven into it. Right is what everything else looks
+        like while it plays.
+        """
+        # The controls open on what a scheme nobody has touched holds,
+        # so the two cannot drift apart.
+        opening = MusicSettings()
+
+        self.mode = _combo(list(MODES))
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+
+        self.swatch = QLabel()
+        self.swatch.setFixedHeight(22)
+        self._show_swatch()
+        colour_row = QHBoxLayout()
+        colour_row.addWidget(self.swatch, 1)
+        colour_row.addWidget(ghost_button("Pick…", self._pick_colour))
+
+        self.amplitude = QSlider(Qt.Horizontal)
+        self.amplitude.setRange(1, 100)
+        self.amplitude.setValue(opening.amplitude)
+        self.amplitude.setToolTip(
+            "A gain on the levels before they are drawn, centred so "
+            "that 50 is the signal as it arrived.")
+        self.amplitude.valueChanged.connect(self._value_changed)
+        # Under the slider and centred, where the vendor puts its own
+        # readout: a gain with no number on it is a control nobody can
+        # come back to.
+        self.amplitude_value = caption("")
+        self.amplitude_value.setAlignment(Qt.AlignCenter)
+
+        self.background = _combo(list(BACKGROUNDS))
+        self.background.currentIndexChanged.connect(self._value_changed)
+
+        self.back_bright = QSlider(Qt.Horizontal)
+        self.back_bright.setRange(0, 100)
+        self.back_bright.setValue(opening.brightness)
+        self.back_bright.valueChanged.connect(self._value_changed)
+        self.back_bright_value = caption("")
+        self.back_bright_value.setAlignment(Qt.AlignCenter)
+
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        left.addWidget(caption("Visualisation mode"))
+        left.addWidget(self.mode)
+        left.addWidget(caption("Colour, for the modes that take one"))
+        left.addLayout(colour_row)
+        left.addWidget(caption("Amplitude"))
+        left.addWidget(self.amplitude)
+        left.addWidget(self.amplitude_value)
+        left.addStretch()
+
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        right.addWidget(caption("Background mode"))
+        right.addWidget(self.background)
+        right.addWidget(caption("Background brightness"))
+        right.addWidget(self.back_bright)
+        right.addWidget(self.back_bright_value)
+        right.addStretch()
+
+        columns = QHBoxLayout()
+        columns.setSpacing(28)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+
+        self._show_values()
+        return _card(columns)
+
+    def _settings_of(self, name: str) -> MusicSettings:
+        return self._settings.setdefault(name, MusicSettings())
+
+    def _load_settings(self, held: MusicSettings) -> None:
+        """Put one scheme's settings into the controls, quietly.
+
+        Quietly because every control writes itself back into the scheme
+        it belongs to as it moves, and these moves belong to the scheme
+        being switched *to*.
+        """
+        for widget, value in ((self.mode, held.mode),
+                              (self.background, held.background)):
+            widget.blockSignals(True)
+            widget.setCurrentIndex(value)
+            widget.blockSignals(False)
+        for slider, value in ((self.amplitude, held.amplitude),
+                              (self.back_bright, held.brightness)):
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+        self._colour = QColor(held.colour)
+        self.meter.scheme = self.mode.currentIndex()
+        self.meter.base = QColor(self._colour)
+        self._show_swatch()
+        self._show_values()
+        self.meter.update()
+
+    def _keep_settings(self) -> None:
+        """Remember the controls against the scheme they belong to."""
+        self._settings[self._scheme_name] = MusicSettings(
+            mode=self.mode.currentIndex(),
+            amplitude=self.amplitude.value(),
+            background=self.background.currentIndex(),
+            brightness=self.back_bright.value(),
+            colour=QColor(self._colour),
         )
-        side.setFixedWidth(330)
 
-        body = QHBoxLayout()
-        body.setSpacing(14)
-        # Pinned to the top: the board is a fixed size, so without this
-        # the card is stretched to the full height and the caption --
-        # the only thing in it that can grow -- takes the slack and
-        # floats in the middle of an empty panel.
-        body.addWidget(_card(caption("Preview"), self.board), 1, Qt.AlignTop)
-        body.addWidget(side, 0, Qt.AlignTop)
+    def _show_values(self) -> None:
+        """The two readouts under the sliders.
 
-        outer.addWidget(_card(caption("Levels"), self.meter))
-        outer.addLayout(body, 1)
-        outer.addStretch()
+        Amplitude is a raw number because that is what it is -- a
+        position on a gain nobody can put a unit on -- and the
+        background is a percentage because that is what a brightness is.
+        """
+        self.amplitude_value.setText(str(self.amplitude.value()))
+        self.back_bright_value.setText(f"{self.back_bright.value()}%")
+
+    def _mode_changed(self, index: int) -> None:
+        self.meter.scheme = index
+        self.meter.update()
+        self._keep_settings()
+
+    def _value_changed(self, _value: int = 0) -> None:
+        self._show_values()
+        self._keep_settings()
+
+    def _band_of(self, key: kb_layout.Key) -> str:
+        """Which band a key stands in, and what is in that band."""
+        band = key_band(key, BANDS)
+        return (f"{key.name} — band {band + 1} of {BANDS}, "
+                f"{self._edges[band]:.0f}–{self._edges[band + 1]:.0f} Hz")
 
     # -- chrome ---------------------------------------------------------
     def _show_swatch(self) -> None:
@@ -695,10 +1104,7 @@ class MusicPage(QWidget):
             self.meter.base = QColor(chosen)
             self._show_swatch()
             self.meter.update()
-
-    def _scheme_changed(self, index: int) -> None:
-        self.meter.scheme = index
-        self.meter.update()
+            self._keep_settings()
 
     def _describe_route(self) -> None:
         """Say on the screen's face what it can and cannot listen to."""
@@ -720,7 +1126,12 @@ class MusicPage(QWidget):
         if capture.start():
             self._capture = capture
             self.meter.run(False)
-            self.status.emit(f"listening on {capture.route}")
+            # The exclusivity is the manual's, and it is the one thing
+            # somebody watching the strip would otherwise read as a
+            # fault rather than as the keyboard doing what it was asked.
+            self.status.emit(
+                f"listening on {capture.route} — the strip's own music "
+                f"effect does not show while this runs")
         else:
             # Not a failure worth refusing to run for: the controls, the
             # meter and the preview are all still worth seeing, so the
@@ -778,7 +1189,7 @@ class MusicPage(QWidget):
 
     def _paint(self, levels: list[float]) -> None:
         """Colour every key from the bands, then send what moved."""
-        scheme = self.scheme.currentIndex()
+        scheme = self.mode.currentIndex()
         behind = self.background.currentIndex()
         back = dim(self._colour, self.back_bright.value() / 100.0)
 

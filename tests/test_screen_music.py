@@ -6,6 +6,10 @@ Audio is injected as plain lists of floats, so the arithmetic that turns
 sound into colours is tested on a build machine exactly as it is on a
 desktop, and the capture itself is tested only for the thing that has to
 work when there is no recorder at all, which is degrading quietly.
+
+The screen carries the app's scheme list now, so it also has a store,
+and every test here runs against one on a temporary path -- the real
+config file is nobody's fixture.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,24 +27,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtGui import QColor
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QColor, QShowEvent
+    from PySide6.QtWidgets import QApplication, QLabel
 except ImportError:                                   # pragma: no cover
     QApplication = None
 
 from mk_k68_lightsmart import layout as kb_layout
+from mk_k68_lightsmart import store
 
 if QApplication is not None:
     from mk_k68_lightsmart import screens
     from mk_k68_lightsmart.screens import music
 
 app = None
+#: Held in a module global so it outlives every test in the file and is
+#: cleaned up when the interpreter exits, not between tests.
+sandbox = None
 
 
 def setUpModule() -> None:
-    global app
+    global app, sandbox
     if QApplication is not None:
         app = QApplication.instance() or QApplication([])
+    sandbox = tempfile.TemporaryDirectory()
+    store.use(store.Store(path=Path(sandbox.name) / "schemes.json"))
+
+
+def tearDownModule() -> None:
+    # One store serves the whole process, and the pages built in
+    # tests/test_screens.py take it without installing one of their own.
+    # What is left installed is therefore what they will edit and save,
+    # so it is empty and on a temporary path -- a first run's store,
+    # which is what they expect.
+    store.use(store.Store(path=Path(sandbox.name) / "left-behind.json"))
 
 
 def tone(hz: float, amplitude: float = 1.0,
@@ -268,6 +288,39 @@ class Colours(unittest.TestCase):
         self.assertEqual(music.band_colour(scheme, 0, 24, 0.95, self.base),
                          music.METER_RED)
 
+    def test_every_ramp_in_the_dropdown_is_read_by_level(self):
+        # The vendor's modes are named colour ramps, so each one has to
+        # have three stops that differ and arrive in level order --
+        # otherwise the name on the dropdown says nothing.
+        for index, (name, _stops) in enumerate(music.RAMPS):
+            seen = [music.band_colour(index, 0, 24, level, self.base)
+                    for level in (0.1, 0.7, 0.95)]
+            self.assertEqual(len(set(c.name() for c in seen)), 3, name)
+
+    def test_a_ramp_holds_its_colour_between_the_stops(self):
+        for index in range(len(music.RAMPS)):
+            below = music.band_colour(index, 0, 24, music.RAMP_MID - 0.01,
+                                      self.base)
+            at = music.band_colour(index, 0, 24, music.RAMP_MID, self.base)
+            just_over = music.band_colour(index, 0, 24,
+                                          music.RAMP_MID + 0.01, self.base)
+            self.assertNotEqual(below, at)
+            self.assertEqual(at, just_over)
+
+    def test_every_mode_the_dropdown_offers_draws_something(self):
+        # Including the two that are not ramps, which is the whole list
+        # the screen's combo is filled from.
+        for index in range(len(music.MODES)):
+            colour = music.band_colour(index, 3, 24, 0.5, self.base)
+            self.assertTrue(colour.isValid(), music.MODES[index])
+
+    def test_a_mode_index_from_nowhere_still_draws(self):
+        # A stored index, or one left over from a shorter list: the
+        # first ramp is what the screen opens on anyway, and refusing
+        # to draw would take the screen down with it.
+        self.assertEqual(music.band_colour(99, 0, 24, 0.1, self.base),
+                         music.METER_GREEN)
+
     def test_the_single_colour_scheme_ignores_band_and_level(self):
         first = music.band_colour(music.SINGLE_COLOUR, 0, 24, 0.1,
                                   self.base)
@@ -490,6 +543,308 @@ class WhatReachesTheKeyboard(unittest.TestCase):
         self.assertEqual(self.page.board.colours, {})
         self.assertFalse(self.page._timer.isActive())
         self.assertFalse(self.page._sender.isActive())
+
+
+class FakeCapture:
+    """A recorder that hands over one frame and stays alive.
+
+    The page asks a capture for three things, so that is all this is.
+    It keeps the suite hermetic: the audio is a list of floats written
+    by a test, not a sound card nobody's build machine has.
+    """
+
+    def __init__(self, block, rate: int = 48000):
+        self.rate = rate
+        self._block = block
+
+    def alive(self) -> bool:
+        return True
+
+    def latest(self):
+        block, self._block = self._block, None
+        return block
+
+    def stop(self) -> None:
+        pass
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class ScreenFixture(unittest.TestCase):
+    """A page over a store that lives in a temporary directory."""
+
+    def setUp(self):
+        self.path = Path(sandbox.name) / f"{self.id()}.json"
+        store.use(store.Store(path=self.path))
+        self.page = screens.MusicPage()
+        self.said: list[str] = []
+        self.page.status.connect(self.said.append)
+
+    def tearDown(self):
+        self.page._stop()
+
+    def saved(self) -> store.Store:
+        """The store as the next start of the app would read it."""
+        return store.Store.load(self.path)
+
+    def naming(self, name: str):
+        """Answer the name dialog an add or a rename puts up."""
+        return mock.patch.object(
+            music.QInputDialog, "getText",
+            staticmethod(lambda *a, **k: (name, True)))
+
+    def answering(self, yes: bool):
+        """Answer the confirmation a destructive action asks for."""
+        reply = music.QMessageBox.Yes if yes else music.QMessageBox.No
+        return mock.patch.object(
+            music.QMessageBox, "question",
+            staticmethod(lambda *a, **k: reply))
+
+    def rows(self) -> list[str]:
+        return [self.page.schemes.item(n).text()
+                for n in range(self.page.schemes.count())]
+
+
+class TheSchemeList(ScreenFixture):
+    """The vendor draws its scheme list on this screen too, and the
+    list is the app's one list -- so choosing here is switching."""
+
+    def test_it_shows_every_scheme_and_marks_the_one_in_use(self):
+        store.shared().add("Night")
+        self.page._refresh_schemes()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertIn("Default", self.rows()[0])
+        self.assertTrue(self.rows()[0].startswith("●"))
+        self.assertTrue(self.rows()[1].startswith("○"))
+
+    def test_choosing_a_row_is_using_that_scheme(self):
+        # The vendor's list has no second step: the dot marks the one in
+        # use and the list is how one is chosen.
+        store.shared().add("Night")
+        self.page._refresh_schemes()
+        switched = []
+        self.page.scheme_changed.connect(switched.append)
+        self.page.schemes.setCurrentRow(1)
+        self.assertEqual(store.shared().active, 1)
+        self.assertEqual(switched[-1].name, "Night")
+        self.assertIn("Night", self.said[-1])
+        self.assertEqual(self.saved().active, 1)
+
+    def test_adding_a_scheme_makes_it_the_one_in_use(self):
+        with self.naming("Night"):
+            self.page._add_scheme()
+        self.assertEqual(store.shared().names(), ["Default", "Night"])
+        self.assertEqual(store.shared().current.name, "Night")
+        self.assertEqual(self.saved().names(), ["Default", "Night"])
+
+    def test_adding_says_so_when_the_name_was_taken(self):
+        # The store renames round a collision rather than refusing one,
+        # which is right for adding and the wrong thing to do quietly.
+        with self.naming("Default"):
+            self.page._add_scheme()
+        self.assertEqual(store.shared().names(), ["Default", "Default 2"])
+        self.assertIn("was taken", self.said[-1])
+
+    def test_a_name_nobody_typed_adds_nothing(self):
+        with mock.patch.object(music.QInputDialog, "getText",
+                               staticmethod(lambda *a, **k: ("", False))):
+            self.page._add_scheme()
+        self.assertEqual(store.shared().names(), ["Default"])
+
+    def test_renaming_renames_the_scheme_and_the_row(self):
+        with self.naming("Night"):
+            self.page._rename_scheme()
+        self.assertEqual(store.shared().names(), ["Night"])
+        self.assertIn("Night", self.rows()[0])
+        self.assertEqual(self.saved().names(), ["Night"])
+
+    def test_renaming_refuses_a_name_already_in_the_list(self):
+        store.shared().add("Night")
+        self.page._refresh_schemes()
+        with self.naming("Night"):
+            self.page._rename_scheme()
+        self.assertEqual(store.shared().names(), ["Default", "Night"])
+        self.assertIn("already a scheme", self.said[-1])
+
+    def test_deleting_drops_the_scheme_and_moves_to_another(self):
+        store.shared().add("Night")
+        self.page._refresh_schemes()
+        self.page.schemes.setCurrentRow(1)
+        self.page._delete_scheme()
+        self.assertEqual(store.shared().names(), ["Default"])
+        self.assertEqual(store.shared().current.name, "Default")
+        self.assertEqual(self.saved().names(), ["Default"])
+
+    def test_deleting_asks_first_when_the_scheme_holds_something(self):
+        # The keyboard keeps no copy of a scheme, so the file is the
+        # only one there is.
+        store.shared().add("Night")
+        store.shared().schemes[1].lighting = {1: 0xFF0000}
+        self.page._refresh_schemes()
+        self.page.schemes.setCurrentRow(1)
+        with self.answering(False):
+            self.page._delete_scheme()
+        self.assertEqual(store.shared().names(), ["Default", "Night"])
+        with self.answering(True):
+            self.page._delete_scheme()
+        self.assertEqual(store.shared().names(), ["Default"])
+
+    def test_the_last_scheme_cannot_be_deleted(self):
+        self.page._delete_scheme()
+        self.assertEqual(store.shared().names(), ["Default"])
+        self.assertIn("has to be one scheme", self.said[-1])
+
+    def test_a_scheme_added_elsewhere_shows_when_the_screen_comes_up(self):
+        store.shared().add("Night")
+        self.page.showEvent(QShowEvent())
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_a_save_that_fails_is_said_rather_than_raised(self):
+        with mock.patch.object(store.Store, "save",
+                               side_effect=OSError("read-only")):
+            with self.naming("Night"):
+                self.page._add_scheme()
+        self.assertTrue(any("could not save" in said for said in self.said))
+
+
+class TheSettingsPanel(ScreenFixture):
+    """The vendor's bottom panel: two dropdowns and two sliders."""
+
+    def test_the_mode_dropdown_offers_every_mode(self):
+        self.assertEqual(
+            [self.page.mode.itemText(n)
+             for n in range(self.page.mode.count())], list(music.MODES))
+        # The vendor's own visible value is the first of them.
+        self.assertEqual(self.page.mode.itemText(music.GREEN_AMBER_RED),
+                         "Green / yellow / red")
+
+    def test_most_of_the_modes_are_named_colour_ramps(self):
+        self.assertGreater(len(music.RAMPS), 1)
+        for index, (name, _stops) in enumerate(music.RAMPS):
+            self.assertEqual(self.page.mode.itemText(index), name)
+
+    def test_choosing_a_mode_recolours_the_meter_as_well(self):
+        # The meter and the board are driven from the same numbers, so
+        # they must not disagree about what a level looks like.
+        self.page.mode.setCurrentIndex(music.SPECTRUM)
+        self.assertEqual(self.page.meter.scheme, music.SPECTRUM)
+
+    def test_the_background_dropdown_offers_none_first(self):
+        self.assertEqual(
+            [self.page.background.itemText(n)
+             for n in range(self.page.background.count())],
+            list(music.BACKGROUNDS))
+        self.assertEqual(self.page.background.itemText(music.NOTHING),
+                         "None")
+
+    def test_the_amplitude_reads_out_as_a_plain_number(self):
+        self.page.amplitude.setValue(38)
+        self.assertEqual(self.page.amplitude_value.text(), "38")
+
+    def test_the_background_brightness_reads_out_as_a_percentage(self):
+        self.page.back_bright.setValue(100)
+        self.assertEqual(self.page.back_bright_value.text(), "100%")
+
+    def test_the_amplitude_slider_is_the_gain_on_the_levels(self):
+        quiet = self._level_at(10)
+        loud = self._level_at(100)
+        self.assertGreater(loud, quiet)
+        self.assertAlmostEqual(music.gain_from_amplitude(50), 1.0)
+
+    def _level_at(self, amplitude: int) -> float:
+        """The loudest band of one quiet frame, at that amplitude."""
+        self.page.amplitude.setValue(amplitude)
+        self.page._smooth.clear()
+        self.page._capture = FakeCapture(tone(1000.0, 0.05))
+        levels = self.page._listen()
+        self.page._capture = None
+        return max(levels)
+
+    def test_the_background_brightness_dims_the_unlit_keys(self):
+        self.page.background.setCurrentIndex(music.DIM_STATIC)
+        self.page.back_bright.setValue(100)
+        self.page._paint([0.0] * music.BANDS)
+        bright = max(c.value() for c in self.page._wire.values())
+        self.page.back_bright.setValue(20)
+        self.page._paint([0.0] * music.BANDS)
+        dim = max(c.value() for c in self.page._wire.values())
+        self.assertGreater(bright, dim)
+
+    def test_the_preview_is_the_board_the_music_lights(self):
+        levels = [0.0] * music.BANDS
+        levels[0] = 1.0
+        self.page._paint(levels)
+        self.assertTrue(self.page.board.colours)
+        self.assertEqual(set(self.page.board.colours), self.page._lit)
+
+    def test_a_key_on_the_preview_says_which_band_it_stands_in(self):
+        said = self.page.board.hover_text(kb_layout.BY_IDENT["G"])
+        self.assertIn("band", said)
+        self.assertIn("Hz", said)
+
+    def test_the_screen_states_the_manual_s_conditions(self):
+        # Wired, playing, and not at the same time as the strip: all
+        # three are the manual's, and all three are invisible otherwise.
+        words = " ".join(
+            label.text() for label in self.page.findChildren(QLabel)).lower()
+        self.assertIn("wired mode", words)
+        self.assertIn("playing", words)
+        self.assertIn("mutually exclusive", words)
+
+    def test_starting_says_the_strip_gives_way(self):
+        with mock.patch.object(music.Capture, "start", lambda self: True):
+            self.page._start()
+        self.assertIn("strip", self.said[-1])
+
+
+class SettingsFollowTheScheme(ScreenFixture):
+    """A scheme is what the vendor hangs these settings off, and the
+    list switches between them -- for as long as the app is open."""
+
+    def test_each_scheme_keeps_its_own_settings(self):
+        self.page.amplitude.setValue(80)
+        self.page.mode.setCurrentIndex(music.SPECTRUM)
+        with self.naming("Night"):
+            self.page._add_scheme()
+        # A new scheme opens on the defaults, not on the last one's.
+        self.assertEqual(self.page.amplitude.value(),
+                         music.MusicSettings().amplitude)
+        self.assertEqual(self.page.mode.currentIndex(),
+                         music.MusicSettings().mode)
+        self.page.schemes.setCurrentRow(0)
+        self.assertEqual(self.page.amplitude.value(), 80)
+        self.assertEqual(self.page.mode.currentIndex(), music.SPECTRUM)
+
+    def test_loading_a_scheme_does_not_write_to_the_one_left_behind(self):
+        self.page.back_bright.setValue(70)
+        with self.naming("Night"):
+            self.page._add_scheme()
+        self.page.back_bright.setValue(5)
+        self.page.schemes.setCurrentRow(0)
+        self.assertEqual(self.page.back_bright.value(), 70)
+
+    def test_the_settings_move_with_a_renamed_scheme(self):
+        self.page.amplitude.setValue(33)
+        with self.naming("Night"):
+            self.page._rename_scheme()
+        self.assertEqual(self.page.amplitude.value(), 33)
+        self.assertIn("Night", self.page._settings)
+
+    def test_a_deleted_scheme_takes_its_settings_with_it(self):
+        with self.naming("Night"):
+            self.page._add_scheme()
+        self.page.amplitude.setValue(21)
+        self.page._delete_scheme()
+        self.assertNotIn("Night", self.page._settings)
+
+    def test_the_colour_in_hand_belongs_to_the_scheme_too(self):
+        self.page._colour = QColor("#123456")
+        self.page._keep_settings()
+        with self.naming("Night"):
+            self.page._add_scheme()
+        self.assertEqual(self.page._colour.name(),
+                         music.MusicSettings().colour.name())
+        self.page.schemes.setCurrentRow(0)
+        self.assertEqual(self.page._colour.name(), "#123456")
 
 
 if __name__ == "__main__":
