@@ -187,6 +187,20 @@ class KeyColours(WorkerCase):
 
 
 @requires_qt
+class LightingEffects(WorkerCase):
+    def test_sends_color_random_flag_brightness_speed_and_direction(self):
+        t = FakeTransport()
+        w = self.make(t)
+        w.set_effect(0x05, 0x12, 0x34, 0x56, 1, 10, 4, 2)
+        self.assertEqual(
+            t.sent[2][:16],
+            protocol.data_frame(
+                0x05, (0x12, 0x34, 0x56), p8=1, p9=10, p10=4, p11=2
+            )[:16],
+        )
+
+
+@requires_qt
 class Uploads(WorkerCase):
     def test_reports_progress_and_finishes(self):
         t = FakeTransport()

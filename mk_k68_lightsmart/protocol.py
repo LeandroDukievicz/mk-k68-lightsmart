@@ -394,16 +394,16 @@ class Keyboard:
 
     # -- lighting -------------------------------------------------------
     def set_effect(self, mode: int, rgb: tuple[int, int, int] = (0, 0, 0),
-                   p8: int = 0, brightness: int = 0, speed: int = 0,
-                   direction: int = 0) -> None:
+                   random_colour: int = 0, brightness: int = 0,
+                   speed: int = 0, direction: int = 0) -> None:
         """Select a built-in animation.
 
-        The driver fills bytes 8-11 from a 20-byte per-effect settings
-        record.  Mapping them to brightness / speed / direction matches
-        the four knobs the UI offers for an effect, but which byte is
-        which has not been confirmed on hardware yet.
+        The driver's per-effect record stores the random-colour flag,
+        RGB, brightness, speed and direction. Its serializer places those
+        values in frame bytes 8, 1-3, 9, 10 and 11 respectively.
         """
-        self.transaction(data_frame(mode, rgb, p8, brightness, speed, direction))
+        self.transaction(
+            data_frame(mode, rgb, random_colour, brightness, speed, direction))
 
     # -- dot-matrix strip -----------------------------------------------
     def upload_animation(self, animation, progress=None, drain=None) -> int:

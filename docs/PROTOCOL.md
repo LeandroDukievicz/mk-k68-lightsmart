@@ -167,7 +167,9 @@ The driver never sends a data frame bare:
 
 ### Built-in animation — `fcn.00430580`
 
-**verified** framing and mode bytes, **inferred** parameter meanings.
+**verified** framing, mode bytes and the settings-record-to-frame field
+copies; the meaning and range of the numeric settings are inferred from
+the vendor UI labels and still need hardware confirmation.
 
 Confirmed on hardware on 2026-10-11 at both ends of the table: `0x00`
 turns the key backlight off, and `0x07` breathes in the colour it is
@@ -205,7 +207,8 @@ without a list entry, so something uses it; what, is not known.
 
 Byte 0 is the effect mode, taken from the app's current-mode field
 (`[esi+0x814]`). Bytes 1-3 and 8-11 are copied out of a 20-byte
-per-effect settings record:
+per-effect settings record. The UI exposes the settings in the same
+order: random colour, RGB colour, brightness, speed and direction.
 
 | frame byte | record offset |
 |---|---|
@@ -215,10 +218,12 @@ per-effect settings record:
 | 10 | 19 |
 | 11 | 17 |
 
-The UI exposes exactly four knobs for an effect — random colour,
-brightness, speed and direction (strings 260-263 and 284) — which is
-almost certainly what bytes 8-11 carry, but the mapping is not yet
-confirmed.
+The implementation maps byte 8 to the random-colour checkbox and bytes
+9-11 to brightness, speed and direction, matching the vendor's controls.
+Random colour sends 0 or 1; the numeric controls send their selected
+0-15 values. These settings are sent for every listed mode. Modes may
+ignore settings they do not use (for example, Close Backlight is an off
+switch); firmware behavior still needs confirmation on the keyboard.
 
 The effect names come from the driver's English string table, ids
 200-221:
@@ -475,8 +480,7 @@ not decoded yet.
 
 1. ~~Numeric ids for the lighting effects~~ — recovered from the
    driver's own list population; see §5. What `0x14` is remains open.
-2. Which of bytes 8-11 is brightness, speed, direction and
-   random-colour, and their ranges.
+2. Confirm parameter ranges and effect-specific behavior on hardware.
 3. ~~The rest of the remap record~~ — the ordinary case is decoded,
    `fcn.004588A0` included; see §7. What remains is the action types
    beyond a plain key: the three-parameter `0x0D`, and the macro

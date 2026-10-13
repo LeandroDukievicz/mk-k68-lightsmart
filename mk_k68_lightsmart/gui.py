@@ -32,6 +32,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QFileDialog,
@@ -804,18 +805,17 @@ class LightPage(QWidget):
     """The built-in lighting animations, with their parameters.
 
     The Home screen can fire one off; this is the screen for choosing
-    among them, and the only place the unknowns are stated: the mode
-    bytes are recovered and confirmed, but which of bytes 8-11 carries
-    brightness, speed and direction is still inferred, so the sliders
-    say so rather than pretending.
+    among them. Each mode uses the vendor's frame fields for random
+    colour, brightness, speed and direction.
     """
 
-    #: mode, colour, brightness, speed, direction
-    apply_requested = Signal(int, int, int, int, int)
+    #: mode, packed RGB, random-colour flag, brightness, speed, direction
+    apply_requested = Signal(int, int, int, int, int, int)
 
     def __init__(self, current_colour, parent: QWidget | None = None):
         super().__init__(parent)
         self._colour = current_colour
+        self._chosen_colour: QColor | None = None
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(20, 14, 20, 14)
@@ -863,6 +863,28 @@ class LightPage(QWidget):
         title.setStyleSheet("color:#cfe3ff; font-size:12px; font-weight:bold;")
         inner.addWidget(title)
 
+        self.random_colour = QCheckBox("Random color")
+        self.random_colour.setToolTip(
+            "Let the keyboard choose a different color for this effect")
+        self.random_colour.setStyleSheet(
+            "QCheckBox { color:#cfe3ff; font-size:11px; spacing:6px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }")
+        inner.addWidget(self.random_colour)
+
+        colour_row = QHBoxLayout()
+        colour_row.addWidget(caption("Color"))
+        self.colour_button = QPushButton("Choose color")
+        self.colour_button.setCursor(Qt.PointingHandCursor)
+        self.colour_button.setFixedWidth(112)
+        self.colour_button.clicked.connect(self.pick_colour)
+        colour_row.addWidget(self.colour_button)
+        self.colour_value = caption("")
+        colour_row.addWidget(self.colour_value)
+        colour_row.addStretch()
+        inner.addLayout(colour_row)
+        self.random_colour.toggled.connect(self._update_colour_controls)
+        self._update_colour_controls()
+
         self.sliders: dict[str, QSlider] = {}
         for name, label, default in (("brightness", "Brightness", 10),
                                      ("speed", "Speed", 8),
@@ -888,10 +910,8 @@ class LightPage(QWidget):
         inner.addLayout(row)
 
         note = QLabel(
-            "The mode bytes are the driver's own, confirmed on hardware. "
-            "Which of the frame's bytes 8-11 carries brightness, speed and "
-            "direction is still inferred — moving a slider may do nothing "
-            "until that is settled."
+            "The selected mode, color options, brightness and speed are "
+            "sent together when you apply the effect."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
@@ -905,11 +925,36 @@ class LightPage(QWidget):
             return protocol.EFFECTS[row]
         return protocol.EFFECTS[0]
 
+    def _effect_colour(self) -> QColor:
+        return QColor(self._chosen_colour or self._colour())
+
+    def _update_colour_controls(self, *_args) -> None:
+        colour = self._effect_colour()
+        self.colour_button.setEnabled(not self.random_colour.isChecked())
+        self.colour_button.setStyleSheet(
+            f"QPushButton {{ background:{colour.name()}; color:#ffffff; "
+            "border:1px solid #2a4a72; border-radius:3px; padding:4px; }"
+            "QPushButton:disabled { color:#6a7d96; }")
+        self.colour_value.setText(
+            "random" if self.random_colour.isChecked() else colour.name())
+
+    def refresh_colour(self) -> None:
+        """Refresh the preview after the shared Home color changes."""
+        self._update_colour_controls()
+
+    def pick_colour(self) -> None:
+        picked = QColorDialog.getColor(
+            self._effect_colour(), self, "Choose effect color")
+        if picked.isValid():
+            self._chosen_colour = picked
+            self._update_colour_controls()
+
     def apply(self) -> None:
-        colour = self._colour()
+        colour = self._effect_colour()
         self.apply_requested.emit(
             self.selected().mode,
             colour.red() << 16 | colour.green() << 8 | colour.blue(),
+            int(self.random_colour.isChecked()),
             self.sliders["brightness"].value(),
             self.sliders["speed"].value(),
             self.sliders["direction"].value(),
@@ -1057,7 +1102,7 @@ class MainWindow(QMainWindow):
     #: transfers from interleaving on the wire.
     request_open = Signal()
     request_key = Signal(int, int, int, int)
-    request_effect = Signal(int, int, int, int, int, int, int)
+    request_effect = Signal(int, int, int, int, int, int, int, int)
     request_upload = Signal(object)
     request_keymap = Signal(object, bool)
 
@@ -1393,6 +1438,11 @@ class MainWindow(QMainWindow):
         self.speed.setFixedWidth(110)
         lay.addWidget(self.speed)
 
+        self.random_effect = QCheckBox("Random color")
+        self.random_effect.setStyleSheet(
+            "QCheckBox { color:#9fb3d0; font-size:11px; spacing:4px; }")
+        lay.addWidget(self.random_effect)
+
         lay.addStretch()
 
         lay.addWidget(primary_button("Apply effect", self.apply_effect))
@@ -1525,6 +1575,7 @@ class MainWindow(QMainWindow):
         if picked.isValid():
             self.colour = picked
             self._paint_swatch()
+            self.light_page.refresh_colour()
 
     # -- the device, which lives on the worker thread --------------------
     def _wire_device(self) -> None:
@@ -1734,26 +1785,29 @@ class MainWindow(QMainWindow):
         mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
-            mode, rgb, p9=self.brightness.value(), p10=self.speed.value()
+            mode, rgb, p8=int(self.random_effect.isChecked()),
+            p9=self.brightness.value(), p10=self.speed.value()
         )
         self.last_packet.setText(" ".join(f"{b:02X}" for b in frame[:16]))
         self.request_effect.emit(
-            mode, *rgb, self.brightness.value(), self.speed.value(), 0
+            mode, *rgb, int(self.random_effect.isChecked()),
+            self.brightness.value(), self.speed.value(), 0
         )
 
-    def apply_light(self, mode: int, rgb: int, brightness: int, speed: int,
-                    direction: int) -> None:
+    def apply_light(self, mode: int, rgb: int, random_colour: int,
+                    brightness: int, speed: int, direction: int) -> None:
         """The Light screen's own request, which carries a direction."""
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{b:02X}" for b in protocol.data_frame(
                 mode, ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF),
-                p9=brightness, p10=speed, p11=direction)[:16]
+                p8=random_colour, p9=brightness, p10=speed,
+                p11=direction)[:16]
         ))
         self.set_status(f"applying {name.name if name else f'{mode:#04x}'}…")
         self.request_effect.emit(
             mode, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF,
-            brightness, speed, direction,
+            random_colour, brightness, speed, direction,
         )
 
 
