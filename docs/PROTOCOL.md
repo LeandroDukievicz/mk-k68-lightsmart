@@ -471,12 +471,13 @@ not decoded yet.
    driver's own list population; see §5. What `0x14` is remains open.
 2. Which of bytes 8-11 is brightness, speed, direction and
    random-colour, and their ranges.
-3. The rest of the remap record: what `fcn.004588A0` derives for
-   bytes 1 and 2, and the remaining action types. The addressing and
-   the envelope are settled; see §7.
+3. ~~The rest of the remap record~~ — the ordinary case is decoded,
+   `fcn.004588A0` included; see §7. What remains is the action types
+   beyond a plain key: the three-parameter `0x0D`, and the macro
+   reference.
 4. The macro event encoding beyond the `0x50` key marker.
 5. Meaning of sub-commands `0x17`, `0x19`, `0x20`, `0x23`, `0x35`,
    `0x61`, `0xF5`.
 
-All five are quickest to settle by sending a packet and watching the
+What is left is quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.

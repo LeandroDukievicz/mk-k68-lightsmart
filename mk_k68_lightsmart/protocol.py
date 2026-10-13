@@ -178,6 +178,75 @@ def effect_mode(text: str) -> int:
         ) from None
 
 
+# -- key remapping -----------------------------------------------------
+#
+# Decoded but never sent: see the note at the end of docs/PROTOCOL.md
+# §7. The encoder is here so it can be tested and compared against the
+# driver; writing one to a keyboard is a separate decision.
+
+#: Bytes in a remap block, and in each key's record.
+REMAP_BYTES = 694
+REMAP_RECORD = 4
+
+#: Where the AA 55 goes, past the records rather than at the end.
+REMAP_MAGIC_AT = 574
+
+#: Record types the driver writes.
+REMAP_UNCHANGED = (0x05, 0x03, 0x00, 0x00)
+REMAP_KEY = 0x02
+
+#: Modifier usages and their bit in the HID modifier byte
+#: (`fcn.004588A0`: a switch on usage - 0xE0 over eight arms).
+MODIFIER_BITS = {0xE0 + n: 1 << n for n in range(8)}
+
+
+def modifier_mask(usage: int) -> int:
+    """What the driver turns a usage into for the record's byte 1.
+
+    A modifier becomes its bit; everything else passes through, and
+    zero stays zero.
+    """
+    if not usage:
+        return 0
+    return MODIFIER_BITS.get(usage, usage)
+
+
+def remap_record(usage: int, modifiers: int = 0) -> tuple[int, int, int, int]:
+    """One key's four bytes: remap it to ``usage`` held with ``modifiers``.
+
+    Mapping a key *to* a modifier puts the mask in byte 1 and leaves
+    byte 2 clear, which is what the driver does at 0x41728B.
+    """
+    if usage in MODIFIER_BITS and not modifiers:
+        return (REMAP_KEY, MODIFIER_BITS[usage], 0x00, 0x00)
+    return (REMAP_KEY, modifier_mask(modifiers), usage & 0xFF, 0x00)
+
+
+def remap_block(changes: dict[int, tuple[int, int]] | None = None) -> bytes:
+    """The 694 bytes of a keymap, with ``changes`` applied.
+
+    ``changes`` maps a key's slot (see :data:`layout.REMAP_SLOTS`) to
+    ``(usage, modifiers)``. Everything not named keeps the record the
+    driver writes for a key left alone.
+    """
+    from .layout import REMAP_SLOTS
+
+    buf = bytearray(REMAP_BYTES)
+    for slot in set(REMAP_SLOTS.values()):
+        at = slot * REMAP_RECORD
+        if at + REMAP_RECORD <= REMAP_MAGIC_AT:
+            buf[at:at + REMAP_RECORD] = bytes(REMAP_UNCHANGED)
+
+    for slot, (usage, modifiers) in (changes or {}).items():
+        at = slot * REMAP_RECORD
+        if at + REMAP_RECORD > REMAP_BYTES:
+            raise ValueError(f"slot {slot} is outside a {REMAP_BYTES}-byte block")
+        buf[at:at + REMAP_RECORD] = bytes(remap_record(usage, modifiers))
+
+    buf[REMAP_MAGIC_AT], buf[REMAP_MAGIC_AT + 1] = FRAME_MAGIC
+    return bytes(buf)
+
+
 class Keyboard:
     """High-level operations on the keyboard."""
 

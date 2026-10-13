@@ -374,3 +374,65 @@ class RemapSlots(unittest.TestCase):
         for key in layout.KEYS:
             end = layout.remap_slot(key) * 4 + 4
             self.assertLessEqual(end, self.BLOCK_BYTES, key.ident)
+
+
+class RemapRecords(unittest.TestCase):
+    """The keymap block, which is encoded here but never sent.
+
+    Decoded from `fcn.00416F20` and `fcn.004588A0`; the tests are the
+    only thing exercising it until writing a keymap is a decision
+    somebody has taken.
+    """
+
+    def test_a_modifier_becomes_its_hid_bit(self):
+        # 0x4588A0: a switch on usage - 0xE0 over eight arms.
+        self.assertEqual(protocol.modifier_mask(0xE0), 0x01)   # LeftCtrl
+        self.assertEqual(protocol.modifier_mask(0xE1), 0x02)   # LeftShift
+        self.assertEqual(protocol.modifier_mask(0xE7), 0x80)   # RightGUI
+
+    def test_anything_else_passes_through(self):
+        self.assertEqual(protocol.modifier_mask(0x04), 0x04)
+        self.assertEqual(protocol.modifier_mask(0), 0)
+
+    def test_a_plain_remap_is_type_two(self):
+        self.assertEqual(protocol.remap_record(0x04), (0x02, 0x00, 0x04, 0x00))
+
+    def test_a_combination_carries_its_modifiers(self):
+        # Shift+A
+        self.assertEqual(protocol.remap_record(0x04, 0xE1),
+                         (0x02, 0x02, 0x04, 0x00))
+
+    def test_mapping_to_a_modifier_clears_the_usage(self):
+        # 0x41728B: the mask goes in byte 1 and byte 2 is zeroed.
+        self.assertEqual(protocol.remap_record(0xE0), (0x02, 0x01, 0x00, 0x00))
+
+    def test_the_block_is_the_length_the_driver_sends(self):
+        block = protocol.remap_block()
+        self.assertEqual(len(block), 694)       # 0x2B6, pushed at 0x4171DC
+
+    def test_the_magic_sits_past_the_records(self):
+        block = protocol.remap_block()
+        self.assertEqual(block[574:576], b"\xaa\x55")
+
+    def test_untouched_keys_get_the_leave_it_alone_record(self):
+        block = protocol.remap_block()
+        at = layout.remap_slot(layout.BY_IDENT["Esc"]) * 4
+        self.assertEqual(tuple(block[at:at + 4]), protocol.REMAP_UNCHANGED)
+
+    def test_a_change_lands_on_that_key_alone(self):
+        caps = layout.remap_slot(layout.BY_IDENT["Caps"])
+        escape = layout.remap_slot(layout.BY_IDENT["Esc"])
+        block = protocol.remap_block({caps: (0xE0, 0)})
+        self.assertEqual(tuple(block[caps * 4:caps * 4 + 4]),
+                         (0x02, 0x01, 0x00, 0x00))
+        self.assertEqual(tuple(block[escape * 4:escape * 4 + 4]),
+                         protocol.REMAP_UNCHANGED)
+
+    def test_a_slot_past_the_block_is_refused(self):
+        with self.assertRaises(ValueError):
+            protocol.remap_block({200: (0x04, 0)})
+
+    def test_every_real_key_fits(self):
+        changes = {slot: (0x04, 0) for slot in layout.REMAP_SLOTS.values()}
+        block = protocol.remap_block(changes)
+        self.assertEqual(len(block), 694)
