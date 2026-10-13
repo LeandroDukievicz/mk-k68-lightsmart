@@ -960,17 +960,23 @@ class CustomPage(QWidget):
     def _targets_now(self) -> dict[int, QColor]:
         """The keys the next Apply writes, with the colour each takes.
 
-        A key picked but never painted takes the colour in hand, which
-        is the vendor's own flow: pick keys, pick a colour, apply. One
-        that was painted keeps its own, so a layout built key by key
-        applies as it was painted rather than being flattened to a
-        single colour. Nothing picked means the whole painted layout,
-        which is what this screen did before it had a selection.
+        Picking keys and then applying is the vendor's whole flow --
+        "select the keys, choose the effect, press Apply to put it on
+        those key positions" -- so an explicit pick takes the colour in
+        hand, including for a key that already carries one. Letting the
+        old colour win there made Apply look dead: the keys were picked,
+        a new colour was chosen, and what went to the keyboard was
+        whatever had been painted before.
+
+        With nothing picked there is no such instruction, so the whole
+        painted layout goes as it was painted -- which keeps a layout
+        built key by key from being flattened to one colour.
         """
-        colour = QColor(self._colour())
-        picked = self.chosen or set(self.painted)
-        return {index: QColor(self.painted.get(index, colour))
-                for index in sorted(picked)}
+        if self.chosen:
+            colour = QColor(self._colour())
+            return {index: QColor(colour) for index in sorted(self.chosen)}
+        return {index: QColor(colour)
+                for index, colour in sorted(self.painted.items())}
 
     def showEvent(self, event) -> None:
         """Re-read the layout whenever the screen comes up.

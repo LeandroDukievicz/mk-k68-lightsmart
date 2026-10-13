@@ -512,5 +512,53 @@ class TheEffect(Fixture):
         self.assertGreater(self.page._step(), slow)
 
 
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class WhatApplyPutsOnThePickedKeys(Fixture):
+    """Which colour wins when a picked key already carries one.
+
+    Regression. Letting the painted colour win made Apply look dead on
+    a board that was already painted: keys picked, a new colour chosen,
+    and what reached the keyboard was what had been painted before --
+    "nothing happens", reported as the whole screen being broken.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sent: list[tuple[int, str]] = []
+        self.page.apply_key.connect(
+            lambda i, c: self.sent.append((i, c.name())))
+
+    def test_a_picked_key_takes_the_colour_in_hand(self):
+        self.press("A")                      # paints it PAINT and picks it
+        self.page._use(QColor("#00ffff"))
+        got = self.page._targets_now()
+        self.assertEqual(got[self.key("A").light_index].name(), "#00ffff")
+
+    def test_every_picked_key_takes_it_not_just_the_unpainted_ones(self):
+        self.stroke("A", "S")
+        self.page._use(QColor("#123456"))
+        got = self.page._targets_now()
+        self.assertEqual({c.name() for c in got.values()}, {"#123456"})
+
+    def test_apply_sends_the_chosen_colour(self):
+        self.press("A")
+        self.page._use(QColor("#00ffff"))
+        self.page._select_effect(
+            next(e for e in custom.CUSTOM_EFFECTS if e.name == "Static"))
+        self.page._apply()
+        self.assertEqual([c for _, c in self.sent], ["#00ffff"])
+
+    def test_with_nothing_picked_the_layout_goes_as_painted(self):
+        # No pick is no instruction, so a layout built key by key must
+        # not be flattened to whatever colour happens to be in hand.
+        self.press("A")
+        self.page._use(QColor("#00ff00"))
+        self.press("S")
+        self.page.chosen.clear()
+        got = self.page._targets_now()
+        self.assertEqual(got[self.key("A").light_index].name(), PAINT)
+        self.assertEqual(got[self.key("S").light_index].name(), "#00ff00")
+
+
 if __name__ == "__main__":
     unittest.main()
