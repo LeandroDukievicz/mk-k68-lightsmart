@@ -450,8 +450,9 @@ class MatrixPage(QWidget):
         speed.addWidget(caption("Speed"))
         self.speed = QSlider(Qt.Horizontal)
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
-        # A quarter faster than the rate the shipped effects were drawn
-        # at, which is what the rest of the program defaults to too.
+        # Faster than the rate the shipped effects were drawn at, by
+        # whatever PLAYBACK_BOOST says -- the same default the rest of
+        # the program sends.
         self.speed.setValue(matrix.DEFAULT_PLAYBACK_SPEED)
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)

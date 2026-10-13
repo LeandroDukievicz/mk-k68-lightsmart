@@ -62,8 +62,13 @@ NATIVE_SPEED = SPEED_BASE - NATIVE_WIRE_SPEED
 #: The native rate is what the designs were drawn at, but read on
 #: sixty-five columns it still crawls, so the default asks for more.
 #: The byte is a frame delay, so the boost divides it. This is the one
-#: number to raise when the strip reads slow.
-PLAYBACK_BOOST = 1.25
+#: number to raise when the strip reads slow, and raising it is all the
+#: next adjustment needs: the help text and the labels are generated
+#: from it, so nothing restates the rate and goes stale.
+#:
+#: 1.5625 is two quarters compounded -- 1.25 read slow, and so did
+#: 1.25 again on top of it.
+PLAYBACK_BOOST = 1.25 * 1.25
 
 #: The setting every path defaults to: the vendor's rate, boosted.
 DEFAULT_PLAYBACK_SPEED = SPEED_BASE - round(NATIVE_WIRE_SPEED / PLAYBACK_BOOST)

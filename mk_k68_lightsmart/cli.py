@@ -517,6 +517,13 @@ def cmd_effects(args: argparse.Namespace) -> int:
     return 0
 
 
+def speed_help() -> str:
+    """The --speed help, generated so a change of rate cannot stale it."""
+    return (f"1-100; the default is {matrix.PLAYBACK_BOOST:g}x the rate the "
+            f"vendor's own designs assume, about "
+            f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="mk-k68-lightsmart",
@@ -588,9 +595,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="frames per panel (default 1)")
     m.add_argument("--brightness", type=int, default=100, help="0-100")
     m.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
-                   help="1-100; the default is a quarter faster than the "
-                        "rate the vendor's own designs assume (~80 ms a "
-                        "frame)")
+                   help=speed_help())
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
 
@@ -603,8 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     ro.add_argument("--brightness", type=int, default=100, help="0-100")
     ro.add_argument("--speed", type=int,
                     default=matrix.DEFAULT_PLAYBACK_SPEED,
-                    help="1-100; the default is a quarter faster than the "
-                         "vendor's own rate")
+                    help=speed_help())
     ro.set_defaults(func=cmd_rotate)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
@@ -612,9 +616,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="which one; omit to list them")
     pt.add_argument("--brightness", type=int, default=100, help="0-100")
     pt.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
-                   help="1-100; the default is a quarter faster than the "
-                        "rate the vendor's own designs assume (~80 ms a "
-                        "frame)")
+                   help=speed_help())
     pt.add_argument("--dry-run", action="store_true")
     pt.set_defaults(func=cmd_pattern)
 
@@ -625,9 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--frames", type=int, help="stop after this many frames")
     i.add_argument("--brightness", type=int, default=100, help="0-100")
     i.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
-                   help="1-100; the default is a quarter faster than the "
-                        "rate the vendor's own designs assume (~80 ms a "
-                        "frame)")
+                   help=speed_help())
     i.add_argument("--dry-run", action="store_true")
     i.set_defaults(func=cmd_image)
 
