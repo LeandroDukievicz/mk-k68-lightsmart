@@ -97,17 +97,49 @@ Execute direto do checkout, sem publicar ou gerar pacote:
 ./mk-k68-lightsmart info
 ```
 
-Para abrir pelo menu de aplicativos, instale o atalho deste checkout na
-sua conta:
+Para abrir pelo menu de aplicativos, instale o atalho e o ícone na sua
+conta. Os dois ficam fora do checkout de propósito, apontando para um
+lançador em `~/.local/bin`, para o menu não quebrar se a pasta do
+projeto for movida ou reconstruída:
 
 ```sh
-mkdir -p ~/.local/share/applications
-cp desktop/mk-k68-lightsmart.desktop ~/.local/share/applications/mk-k68-lightsmart_gui.desktop
+mkdir -p ~/.local/bin ~/.local/share/applications \
+         ~/.local/share/icons/hicolor/64x64/apps
+
+cat > ~/.local/bin/mk-k68-lightsmart-gui <<EOF
+#!/usr/bin/env bash
+exec python3 -c "
+import sys
+sys.path.insert(0, '$PWD')
+from mk_k68_lightsmart.gui import main
+raise SystemExit(main())
+" "\$@"
+EOF
+sed 's|gui import main|cli import main|' ~/.local/bin/mk-k68-lightsmart-gui \
+    > ~/.local/bin/mk-k68-lightsmart
+chmod +x ~/.local/bin/mk-k68-lightsmart ~/.local/bin/mk-k68-lightsmart-gui
+
+cp docs/images/icon-64.png \
+   ~/.local/share/icons/hicolor/64x64/apps/mk-k68-lightsmart.png
+sed -e "s|^Exec=.*|Exec=$HOME/.local/bin/mk-k68-lightsmart-gui|" \
+    -e 's|^Icon=.*|Icon=mk-k68-lightsmart|' \
+    desktop/mk-k68-lightsmart.desktop \
+    > ~/.local/share/applications/mk-k68-lightsmart_gui.desktop
 update-desktop-database ~/.local/share/applications
 ```
 
-Esse atalho local substitui o atalho antigo do Snap no menu e abre esta
-cópia do projeto.
+**Não instale isto como Snap.** Houve um pacote Snap deste app, e
+tê-lo instalado junto com o checkout significava duas cópias com código
+diferente disputando o mesmo teclado -- uma sempre desatualizada, e
+nenhuma pista de qual estava rodando. O empacotamento foi removido do
+projeto. Se ainda houver um instalado de antes:
+
+```sh
+sudo snap remove mk-k68-lightsmart
+```
+
+Os esquemas ficam em `~/.config/mk-k68-lightsmart/`, fora de qualquer
+pacote, então remover o Snap não os apaga.
 
 ### Manter as versões no Git
 
