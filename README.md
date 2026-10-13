@@ -55,10 +55,10 @@ cannot yet carry, and each says so on its face.
 | Dot-matrix frame upload | ✅ confirmed on hardware |
 | Dot-matrix editor UI | ✅ frames, timeline, playback, import, upload |
 | Key remapping | ✅ screen and CLI both write, with the vendor's own default map as the way back; not yet confirmed on hardware |
-| Custom lighting | ✅ paint a whole board and send it, key by key; storing it as a profile needs the profile commands |
-| Macros | 🔍 screen edits and keeps them; the event encoding is still undecoded, so nothing is sent |
-| User profiles | 🔍 screen edits the scheme list; the driver has no switch command, so a scheme is a host-side bundle |
-| Music-reactive | 🔍 screen and controls built; needs an audio capture, not a new command |
+| Custom lighting | ✅ paint, drag, erase, group selectors, import/export; the keyboard cannot be made to *remember* a layout, which needs the profile commands |
+| User profiles | ✅ schemes kept here and replayed onto the keyboard, which is what the vendor's own driver does — it has no switch command either |
+| Music-reactive | ✅ records what is playing (`pw-record`, falling back to `parec`) and drives the keys; degrades to a stand-in meter where neither exists |
+| Macros | 🔍 the editor is complete and persists; the send is disabled because an event on the wire is a `0x50` marker and two undecoded bytes |
 
 ---
 
