@@ -97,6 +97,18 @@ Execute direto do checkout, sem publicar ou gerar pacote:
 ./mk-k68-lightsmart info
 ```
 
+Para abrir pelo menu de aplicativos, instale o atalho deste checkout na
+sua conta:
+
+```sh
+mkdir -p ~/.local/share/applications
+cp desktop/mk-k68-lightsmart.desktop ~/.local/share/applications/mk-k68-lightsmart_gui.desktop
+update-desktop-database ~/.local/share/applications
+```
+
+Esse atalho local substitui o atalho antigo do Snap no menu e abre esta
+cópia do projeto.
+
 ### Manter as versões no Git
 
 As mudanças permanecem na branch local atual. Para conferir o histórico e
