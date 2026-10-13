@@ -70,6 +70,8 @@ class DeviceWorker(QObject):
         # so only the latest value per key is kept.
         self._pending: dict[int, tuple[int, int, int]] = {}
         self._lock = threading.Lock()
+        self._upload_lock = threading.Lock()
+        self._upload_prepared = False
         # Guards _unstuck against recursing: freeing the keyboard runs
         # commands of its own, and those go through the same guard.
         self._recovering = False
@@ -96,6 +98,17 @@ class DeviceWorker(QObject):
     def cancel(self) -> None:
         """Ask an upload to stop. Safe to call from any thread."""
         self._cancel.set()
+
+    def prepare_upload(self) -> None:
+        """Reset cancellation before a queued upload is handed to Qt.
+
+        The window can be closed after it queues the upload but before
+        this worker begins processing it. Preparing here ensures that a
+        cancellation in that interval is not erased at slot entry.
+        """
+        with self._upload_lock:
+            self._cancel.clear()
+            self._upload_prepared = True
 
     # -- operations -----------------------------------------------------
     def _guard(self, what: str, fn) -> bool:
@@ -209,12 +222,15 @@ class DeviceWorker(QObject):
     @Slot(object)
     def upload(self, animation: Animation) -> None:
         """Push an animation to the strip, reporting progress."""
+        with self._upload_lock:
+            if not self._upload_prepared:
+                # Also supports direct callers and consecutive uploads.
+                self._cancel.clear()
+            self._upload_prepared = False
         if self.kb is None:
             self.disconnected.emit("no keyboard")
             self.upload_finished.emit(False)
             return
-
-        self._cancel.clear()
         last = 0
         at_stop = {"sent": 0, "total": 0}
 
@@ -276,12 +292,14 @@ class DeviceThread:
     def start(self) -> None:
         self.thread.start()
 
-    def stop(self, timeout_ms: int = 5000) -> bool:
-        """Cancel any upload, then stop the thread and wait for it."""
+    def stop(self) -> None:
+        """Stop the worker after its current operation has finished.
+
+        Terminating a QThread while it is inside an ioctl can leave both
+        the descriptor and the keyboard's upload transaction unfinished.
+        The window defers closing during an upload, so this join is short
+        and always lets ``worker.close`` run on the owning thread.
+        """
         self.worker.cancel()
         self.thread.quit()
-        if not self.thread.wait(timeout_ms):
-            self.thread.terminate()
-            self.thread.wait(1000)
-            return False
-        return True
+        self.thread.wait()

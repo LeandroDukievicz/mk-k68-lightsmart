@@ -37,6 +37,14 @@ class SchemeBookkeeping(unittest.TestCase):
         self.assertEqual(self.s.active, 0)
         self.assertEqual(self.s.current.name, "Default")
 
+    def test_dropping_a_scheme_before_the_active_one_keeps_the_same_scheme(self):
+        self.s.add("Work")
+        self.s.add("Games")
+        self.s.active = 2
+        self.s.remove(0)
+        self.assertEqual(self.s.active, 1)
+        self.assertEqual(self.s.current.name, "Games")
+
     def test_a_duplicate_does_not_share_its_parents_dicts(self):
         self.s.current.lighting[5] = 0xFF0000
         copy = self.s.duplicate(0)
@@ -88,6 +96,17 @@ class TheFile(unittest.TestCase):
 
     def test_a_corrupt_file_does_not_take_the_app_with_it(self):
         self.path.write_text("{ not json")
+        self.assertEqual(store.Store.load(self.path).names(), ["Default"])
+
+    def test_valid_json_with_the_wrong_root_shape_does_not_crash(self):
+        self.path.write_text("[]")
+        self.assertEqual(store.Store.load(self.path).names(), ["Default"])
+
+    def test_a_malformed_scheme_record_does_not_crash(self):
+        self.path.write_text(json.dumps({
+            "version": store.VERSION,
+            "schemes": [{"name": "broken", "lighting": [3]}],
+        }))
         self.assertEqual(store.Store.load(self.path).names(), ["Default"])
 
     def test_a_file_from_a_later_version_is_refused_not_guessed(self):

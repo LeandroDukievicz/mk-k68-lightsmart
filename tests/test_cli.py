@@ -69,6 +69,14 @@ class CommandLine(unittest.TestCase):
         # The white corner LED leads the payload, B G R.
         self.assertIn("FF FF FF", out)
 
+    def test_version_flag_reports_the_source_version(self):
+        from mk_k68_lightsmart import __version__
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+            cli.main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(out.getvalue().strip(), __version__)
+
     def test_a_dry_run_names_the_boot_slot_and_its_command(self):
         code, out = self.run_cli(["strip", "clear", "--boot", "--dry-run"])
         self.assertEqual(code, 0)

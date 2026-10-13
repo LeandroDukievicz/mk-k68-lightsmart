@@ -432,6 +432,11 @@ class RemapRecords(unittest.TestCase):
         with self.assertRaises(ValueError):
             protocol.remap_block({200: (0x04, 0)})
 
+    def test_negative_or_non_keyboard_slots_are_refused(self):
+        for slot in (-1, 0, 2):
+            with self.subTest(slot=slot), self.assertRaises(ValueError):
+                protocol.remap_block({slot: (0x04, 0)})
+
     def test_every_real_key_fits(self):
         changes = {slot: (0x04, 0) for slot in layout.REMAP_SLOTS.values()}
         block = protocol.remap_block(changes)

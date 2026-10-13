@@ -255,10 +255,11 @@ def remap_block(changes: dict[int, tuple[int, int]] | None = None) -> bytes:
         if at + REMAP_RECORD <= REMAP_MAGIC_AT:
             buf[at:at + REMAP_RECORD] = bytes(REMAP_UNCHANGED)
 
+    valid_slots = set(REMAP_SLOTS.values())
     for slot, (usage, modifiers) in (changes or {}).items():
+        if not isinstance(slot, int) or slot not in valid_slots:
+            raise ValueError(f"slot {slot!r} is not a key on this keyboard")
         at = slot * REMAP_RECORD
-        if at + REMAP_RECORD > REMAP_BYTES:
-            raise ValueError(f"slot {slot} is outside a {REMAP_BYTES}-byte block")
         buf[at:at + REMAP_RECORD] = bytes(remap_record(usage, modifiers))
 
     buf[REMAP_MAGIC_AT], buf[REMAP_MAGIC_AT + 1] = FRAME_MAGIC

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import array
 import atexit
+import functools
 import math
 import queue
 import shutil
@@ -205,30 +206,42 @@ def band_edges(count: int = BANDS, low: float = LOW_HZ,
     return [math.exp(math.log(low) + step * i) for i in range(count + 1)]
 
 
+@functools.lru_cache(maxsize=16)
+def _fft_plan(size: int, rate: int, edges: tuple[float, ...]):
+    """Precompute the fixed work for a given audio format and band map."""
+    freqs = _np.fft.rfftfreq(size, 1.0 / rate)
+    bands = []
+    for low, high in zip(edges, edges[1:]):
+        start = int(_np.searchsorted(freqs, low, side="left"))
+        stop = int(_np.searchsorted(freqs, high, side="left"))
+        nearest = int(_np.argmin(_np.abs(freqs - math.sqrt(low * high))))
+        bands.append((start, stop, nearest))
+    window = _np.hanning(size)
+    return window, max(window.sum() / 2.0, 1e-9), tuple(bands)
+
+
 def _fft_bands(samples, rate: int, edges: list[float]) -> list[float]:
     block = _np.asarray(samples, dtype=float)
-    window = _np.hanning(block.size)
+    window, scale, bands = _fft_plan(
+        block.size, rate, tuple(float(edge) for edge in edges)
+    )
     # Divided by the window's own coherent gain rather than by the frame
     # size, so a full-scale sinusoid reads 1.0 whatever the frame length
     # and whatever window is used. That is what lets the next stage talk
     # in dBFS instead of in arbitrary units.
-    scale = max(window.sum() / 2.0, 1e-9)
     spectrum = _np.abs(_np.fft.rfft(block * window)) / scale
-    freqs = _np.fft.rfftfreq(block.size, 1.0 / rate)
     out = []
-    for low, high in zip(edges, edges[1:]):
-        taken = spectrum[(freqs >= low) & (freqs < high)]
-        if taken.size:
+    for start, stop, nearest in bands:
+        if start < stop:
             # The peak, not the mean: the top bands are a third of an
             # octave wide, and averaging would bury a loud snare in the
             # empty bins beside it.
-            out.append(float(taken.max()))
+            out.append(float(spectrum[start:stop].max()))
         else:
             # The bottom few bands are narrower than one bin, so no bin
             # centre falls inside them. Reading the nearest bin instead
             # of zero is the difference between a bass line that lights
             # the left of the board and one that never lights at all.
-            nearest = int(_np.argmin(_np.abs(freqs - math.sqrt(low * high))))
             out.append(float(spectrum[nearest]))
     return out
 

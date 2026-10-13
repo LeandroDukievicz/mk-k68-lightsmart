@@ -9,14 +9,13 @@ version = "0.1.0"
 description = "RGB and dot-matrix control for the 68-key LightSmart keyboard"
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+]
 license = "GPL-3.0-or-later"
 # PySide6-Essentials, not the PySide6 meta-package: the latter pulls in
 # Addons (QtWebEngine, Qt3D, Multimedia) and roughly a gigabyte with it.
 dependencies = ["PySide6-Essentials>=6.5"]
-
-[project.urls]
-Homepage = "https://github.com/LeandroDukievicz/mk-k68-lightsmart"
-Issues = "https://github.com/LeandroDukievicz/mk-k68-lightsmart/issues"
 
 [project.scripts]
 mk-k68-lightsmart = "mk_k68_lightsmart.cli:main"
@@ -24,16 +23,10 @@ mk-k68-lightsmart = "mk_k68_lightsmart.cli:main"
 [project.gui-scripts]
 mk-k68-lightsmart-gui = "mk_k68_lightsmart.gui:main"
 
-# Found rather than listed. A listed package is one more place to
-# remember: `screens` was added as a subpackage and not added here, so
-# the wheel -- and the snap built from it -- shipped a `gui` that
-# imports a `screens` that is not there, which is a crash on startup
-# and not a missing feature. Discovery cannot forget.
+# Discover all application modules, including the screens subpackage.
 [tool.setuptools.packages.find]
 include = ["mk_k68_lightsmart*"]
 
-# The shipped animations, as the bytes the keyboard is sent. Without
-# this they are left out of the wheel, and so out of the snap: the app
-# installs fine and offers an empty effect list.
+# The local built-in animations, sent to the keyboard as-is.
 [tool.setuptools.package-data]
 mk_k68_lightsmart = ["effects/index.json", "effects/*.strip.gz"]

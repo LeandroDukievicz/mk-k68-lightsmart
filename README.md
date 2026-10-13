@@ -1,4 +1,9 @@
-# MK-K68-LightSmart
+# MK-K68-LightSmart — uso local no Linux
+
+Projeto privado, mantido e executado neste computador Linux. Não há
+pacote de publicação nem suporte planejado para outros sistemas. O código
+fica versionado no Git local para registrar alterações e permitir voltar
+a versões anteriores.
 
 Linux control panel for 68-key mechanical keyboards that carry a **65×5
 dot-matrix LED strip** above the function row — the hardware whose vendor
@@ -68,9 +73,48 @@ says what it cannot do rather than leaving the section out.
 
 ---
 
-## Install
+## Preparar neste Ubuntu
 
-### 1. udev rule
+Este checkout foi ajustado para o Ubuntu 26.04 deste computador. O
+protocolo depende de `fcntl` e do dispositivo `/dev/hidraw`; não funciona
+no Windows ou macOS.
+
+Instale as dependências do sistema:
+
+```sh
+sudo apt install python3 python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore
+```
+
+O medidor de música usa PipeWire. Neste Linux ele está disponível por
+`pw-record` (pacote `pipewire-bin`); sem captura de áudio, a tela usa um
+medidor de demonstração.
+
+Execute direto do checkout, sem publicar ou gerar pacote:
+
+```sh
+./mk-k68-lightsmart-gui
+./mk-k68-lightsmart --version
+./mk-k68-lightsmart info
+```
+
+### Manter as versões no Git
+
+As mudanças permanecem na branch local atual. Para conferir o histórico e
+salvar um marco local:
+
+```sh
+git status
+git add -A
+git commit -m "Melhora o controle local do teclado"
+git tag v0.1.0-local
+```
+
+Não use `git push` para manter este projeto somente neste computador.
+
+## Acesso ao teclado
+
+Instale a regra udev para liberar somente a interface de configuração do
+teclado para sua sessão, sem expor as interfaces de digitação:
 
 Without it the tool needs root.
 
@@ -100,21 +144,6 @@ for n in /dev/hidraw*; do printf '%s ' "$n"; getfacl -p "$n" | grep -c "^user:$U
 ```
 
 Only the vendor interface should report `1`.
-
-### 2. Dependencies
-
-```sh
-sudo apt install python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore
-```
-
-Python 3.10 or newer. Nothing else — the transport is plain `fcntl.ioctl`.
-
-### 3. Run
-
-```sh
-./mk-k68-lightsmart-gui     # the desktop app
-./mk-k68-lightsmart info    # the CLI
-```
 
 ---
 
@@ -295,32 +324,6 @@ The vendor installer is Inno Setup; inside it, `DeviceDriver.exe` is a
 
 Every protocol claim in `docs/PROTOCOL.md` cites the address it came
 from, so it can be re-checked.
-
----
-
-## Packaging
-
-See [docs/PACKAGING.md](docs/PACKAGING.md) for the full reasoning.
-
-The short version: on a classic desktop **no snap interface grants
-`/dev/hidraw` access**. snapd's `hidraw` interface is only slotted by
-gadget snaps, i.e. Ubuntu Core:
-
-```
-$ snap interface hidraw
-name:          hidraw
-summary:       allows access to specific hidraw device
-documentation: https://snapcraft.io/docs/hidraw-interface
-          <- no "slots:" section: nothing on this system provides one
-
-$ snap interfaces | grep -c hidraw
-0
-```
-
-So the snap is built **classic**, which needs manual store review. The
-alternatives — `raw-usb` with libusb (needs detaching the kernel driver
-on every operation) and the `custom-device` interface (still a store
-review) — are written up with their trade-offs.
 
 ---
 

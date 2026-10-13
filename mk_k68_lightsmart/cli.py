@@ -12,6 +12,7 @@ import sys
 import time
 
 from . import layout, matrix, protocol
+from . import __version__
 from . import transport
 from .transport import DeviceNotFound, KT68Transport, TransportError
 
@@ -437,6 +438,8 @@ def cmd_image(args: argparse.Namespace) -> int:
     blocks = animation.block_count()
     kept = (f"every {args.stride} of {loaded.available}" if args.stride > 1
             else f"all {loaded.available}")
+    if loaded.truncated:
+        kept += f" (first {len(loaded.frames)} kept; frame limit)"
     print(f"source        : {loaded.size[0]}x{loaded.size[1]}, "
           f"{loaded.available} frame(s)"
           + (f", {loaded.delay_ms} ms apart" if loaded.delay_ms else ""))
@@ -628,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="mk-k68-lightsmart",
         description="Control a 68-key LightSmart keyboard over its vendor HID channel.",
     )
+    p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("info", help="show the detected device (read-only)").set_defaults(func=cmd_info)

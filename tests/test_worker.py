@@ -243,6 +243,19 @@ class Uploads(WorkerCase):
         )
         self.assertIn("still wants 14 blocks", self.events["status"][0][0])
 
+    def test_cancel_before_the_queued_upload_starts_is_not_lost(self):
+        w = self.make()
+        t = FakeTransport()
+        w.kb = protocol.Keyboard(t)
+        # The window queues the slot, then the user closes before the
+        # worker starts it. This used to be erased by Event.clear().
+        w.prepare_upload()
+        w.cancel()
+        w.upload(self.one_frame())
+        self.assertEqual(self.events["upload_finished"], [(False,)])
+        self.assertEqual(len(t.sent), 20)
+        self.assertEqual(t.sent[4:18], [bytes(transport.REPORT_SIZE)] * 14)
+
     def test_a_failed_block_is_drained_too(self):
         # Same reason: the firmware is counting, and a transfer that
         # failed partway still owes it the rest.

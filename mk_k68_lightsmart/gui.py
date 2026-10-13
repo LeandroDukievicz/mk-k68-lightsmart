@@ -719,13 +719,14 @@ class MatrixPage(QWidget):
         stride = 1
         if peek.available > self.COMFORTABLE_FRAMES:
             suggested = -(-peek.available // self.COMFORTABLE_FRAMES)
+            minimum = -(-peek.available // matrix.MAX_FRAMES_ANIMATION)
             stride, ok = QInputDialog.getInt(
                 self, "Import an animation",
                 f"{peek.available} frames, {peek.size[0]}x{peek.size[1]}.\n"
                 f"The whole thing uploads in about "
                 f"{self._seconds_for(peek.available)} s.\n\n"
                 "Keep every nth frame:",
-                suggested, 1, peek.available,
+                suggested, minimum, peek.available,
             )
             if not ok:
                 return
@@ -742,6 +743,8 @@ class MatrixPage(QWidget):
         self._refresh_timeline()
         kept = (f"every {stride} of {loaded.available}" if stride > 1
                 else f"all {loaded.available}")
+        if loaded.truncated:
+            kept += f" (first {len(loaded.frames)} kept; keyboard limit)"
         self.status.emit(
             f"imported {len(self.frames)} frames ({kept}) — "
             f"about {self._seconds_for(len(self.frames))} s to upload"
@@ -1088,6 +1091,7 @@ class MainWindow(QMainWindow):
         self.device = DeviceThread()
         self._connected = False
         self._uploading = False
+        self._close_after_upload = False
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -1571,11 +1575,21 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        if self._uploading:
+            self._close_after_upload = True
+            # Stop producers before waiting for the device worker. They
+            # otherwise keep queuing colour writes behind a long upload.
+            self.custom_page._stop()
+            self.music_page._stop()
+            self.cancel_upload()
+            self.set_status(
+                "finishing the keyboard transfer before closing…")
+            event.ignore()
+            return
         self.matrix_page.stop()
-        # Cancels any upload, then joins the thread, so the descriptor is
-        # closed by the thread that opened it.
-        if not self.device.stop():
-            print("device thread would not stop; terminated it", file=sys.stderr)
+        # The transfer is complete (or there was none), so the descriptor
+        # can be closed by the thread that opened it.
+        self.device.stop()
         super().closeEvent(event)
 
     def set_status(self, text: str, ok: bool | None = None) -> None:
@@ -1677,6 +1691,7 @@ class MainWindow(QMainWindow):
             self.set_status(f"nothing to upload: {exc}", ok=False)
             return
         self._set_uploading(True)
+        self.device.worker.prepare_upload()
         self.on_progress(0, blocks)
         self.set_status(
             f"uploading {len(animation.frames)} frame(s), {blocks} blocks…"
@@ -1712,6 +1727,8 @@ class MainWindow(QMainWindow):
         # The worker has already said what happened; this only hands the
         # controls back.
         self._set_uploading(False)
+        if self._close_after_upload:
+            self.close()
 
     def apply_effect(self) -> None:
         mode = self.effect_box.currentData()

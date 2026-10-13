@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -28,15 +29,7 @@ VERSION = 1
 
 
 def config_dir() -> Path:
-    """Where this machine keeps the file.
-
-    ``SNAP_USER_DATA`` first: inside a snap the home directory is not
-    the one the user thinks it is, and writing to ``~/.config`` from
-    there lands somewhere nothing else will look.
-    """
-    snap = os.environ.get("SNAP_USER_DATA")
-    if snap:
-        return Path(snap) / "schemes"
+    """Where this Linux user keeps the file."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
     root = Path(xdg) if xdg else Path.home() / ".config"
     return root / "mk-k68-lightsmart"
@@ -123,7 +116,7 @@ class Store:
             name=self._free_name(f"{source.name} copy"),
             keymap=dict(source.keymap),
             lighting=dict(source.lighting),
-            macros={k: list(v) for k, v in source.macros.items()},
+            macros=deepcopy(source.macros),
         )
         self.schemes.append(copy)
         return copy
@@ -136,8 +129,13 @@ class Store:
         """
         if len(self.schemes) <= 1:
             return False
+        if not 0 <= index < len(self.schemes):
+            raise IndexError("scheme index out of range")
         self.schemes.pop(index)
-        self.active = min(self.active, len(self.schemes) - 1)
+        if index < self.active:
+            self.active -= 1
+        elif index == self.active:
+            self.active = min(self.active, len(self.schemes) - 1)
         return True
 
     def _free_name(self, wanted: str) -> str:
@@ -160,22 +158,34 @@ class Store:
         """
         path = path or (config_dir() / "schemes.json")
         try:
-            raw = json.loads(path.read_text())
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls(path=path)
-        if raw.get("version") != VERSION:
+        if not isinstance(raw, dict) or raw.get("version") != VERSION:
             return cls(path=path)
-        schemes = [
-            Scheme(
-                name=str(s.get("name", "Scheme")),
-                keymap={int(k): list(v) for k, v in (s.get("keymap") or {}).items()},
-                lighting={int(k): int(v) for k, v in (s.get("lighting") or {}).items()},
-                macros={str(k): list(v) for k, v in (s.get("macros") or {}).items()},
-            )
-            for s in raw.get("schemes", [])
-        ]
-        return cls(schemes=schemes or [Scheme()],
-                   active=int(raw.get("active", 0)), path=path)
+        try:
+            rows = raw.get("schemes", [])
+            if not isinstance(rows, list):
+                return cls(path=path)
+            schemes = [
+                Scheme(
+                    name=str(s.get("name", "Scheme")),
+                    keymap={int(k): list(v) for k, v in
+                            (s.get("keymap") or {}).items()},
+                    lighting={int(k): int(v) for k, v in
+                              (s.get("lighting") or {}).items()},
+                    macros={str(k): list(v) for k, v in
+                            (s.get("macros") or {}).items()},
+                )
+                for s in rows if isinstance(s, dict)
+            ]
+            active = int(raw.get("active", 0))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # Valid JSON can still have a broken shape (for example a
+            # list at the root, or a string where a macro list belongs).
+            # Treat it like a corrupt file instead of crashing the GUI.
+            return cls(path=path)
+        return cls(schemes=schemes or [Scheme()], active=active, path=path)
 
     def save(self) -> Path:
         """Write every scheme, atomically.

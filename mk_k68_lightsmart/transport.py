@@ -153,14 +153,8 @@ RULE_DIR = "/etc/udev/rules.d"
 
 
 def rule_source() -> str:
-    """This installation's copy of the rule.
-
-    A snap is read-only and mounted somewhere else entirely, so the
-    path has to be the one this process can actually see.
-    """
-    snap = os.environ.get("SNAP")
-    root = snap if snap else os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))
+    """The udev rule shipped in this source checkout."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "udev", RULE_NAME)
 
 
