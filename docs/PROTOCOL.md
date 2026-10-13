@@ -477,7 +477,27 @@ not decoded yet.
    reference.
 4. The macro event encoding beyond the `0x50` key marker.
 5. Meaning of sub-commands `0x17`, `0x19`, `0x20`, `0x23`, `0x35`,
-   `0x61`, `0xF5`.
+   `0x61`, `0xF5`. Every control command the driver builds, counted by
+   how often it writes the opcode:
+
+   | sub | writes | known as |
+   |---|---|---|
+   | `0x18` | 13 | begin |
+   | `0xF0` | 8 | end |
+   | `0x35` | 4 | — |
+   | `0x13` | 3 | select the lighting target |
+   | `0x20` | 2 | — |
+   | `0x02` | — | apply |
+   | `0x11` `0x27` | 1 each | keymap, Fn layer |
+   | `0x31` `0x33` | 1 each | boot animation, animation |
+   | `0x15` | 1 | macro |
+   | `0x17` `0x19` `0x23` `0x61` `0xF5` | 1 each | — |
+
+   One of the unknown five is almost certainly the reset: the vendor UI
+   offers "Reset Keyboard Data" and "Restore Factory Settings" (strings
+   410 and 411), so the firmware has the command. Finding it is the
+   first step towards a key-remap screen, because it is the way back
+   from a keymap written wrong.
 
 What is left is quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.
