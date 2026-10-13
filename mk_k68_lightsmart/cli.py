@@ -7,10 +7,12 @@ confirmed one packet at a time.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
 from . import layout, matrix, protocol
+from . import transport
 from .transport import DeviceNotFound, KT68Transport, TransportError
 
 #: One colour per strip row, for the diagnostic pattern. Chosen so that
@@ -234,6 +236,48 @@ def cmd_vendor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_udev(args: argparse.Namespace) -> int:
+    """Put the udev rule in place, with one command instead of three.
+
+    Without the rule the vendor interface belongs to root and the app
+    finds nothing, which is the first thing everyone hits. This runs
+    the copy and the two reloads under sudo and then checks that the
+    keyboard actually became reachable.
+    """
+    import shutil
+    import subprocess
+
+    source = transport.rule_source()
+    if not os.path.exists(source):
+        raise ValueError(f"this install has no copy of the rule at {source}")
+
+    print(f"rule      : {source}")
+    print(f"target    : {transport.RULE_DIR}/{transport.RULE_NAME}")
+    if transport.rule_installed() and not args.force:
+        print("already installed - pass --force to put it there again")
+    else:
+        sudo = [] if os.geteuid() == 0 else ["sudo"]
+        if sudo and shutil.which("sudo") is None:
+            raise ValueError("not root, and sudo is not installed")
+        for command in transport.install_rule_commands():
+            print("  " + " ".join(sudo + command))
+            result = subprocess.run(sudo + command)
+            if result.returncode:
+                print(f"error: that command failed ({result.returncode})",
+                      file=sys.stderr)
+                return 1
+
+    try:
+        path = transport.find_control_device()
+    except DeviceNotFound as exc:
+        print(f"\nthe rule is in place, but: {exc}", file=sys.stderr)
+        return 1
+    readable = os.access(path, os.R_OK | os.W_OK)
+    print(f"\ncontrol interface: {path} "
+          f"{'- reachable' if readable else '- still not readable, try replugging'}")
+    return 0 if readable else 1
+
+
 def cmd_meter(args: argparse.Namespace) -> int:
     """Show what the AI tools on this machine have spent.
 
@@ -275,12 +319,50 @@ def cmd_meter(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rotate(args: argparse.Namespace) -> int:
+    """Put a different effect on the strip every few minutes.
+
+    The keyboard holds one animation at a time, and 941 frames of it --
+    about ninety seconds at the usual rate. Anything longer than that
+    has to come from here, which is the trade: a real five-minute
+    rotation, but the strip spends the seconds of each upload showing
+    the keyboard's loading state, and it stops when this does.
+    """
+    import random
+    from . import patterns
+
+    names = args.names or [name for name in patterns.catalogue()]
+    missing = [name for name in names if name not in patterns.catalogue(True)]
+    if missing:
+        raise ValueError(f"no effect called {missing[0]!r}")
+    if args.shuffle:
+        random.shuffle(names)
+
+    print(f"rotating {len(names)} effects, one every {args.every:g}s")
+    print("ctrl-c to stop\n")
+    index = 0
+    with protocol.Keyboard() as kb:
+        while True:
+            name = names[index % len(names)]
+            animation = matrix.Animation(
+                frames=patterns.build(name), brightness=args.brightness,
+                speed=args.speed,
+            )
+            blocks = animation.block_count()
+            print(f"{name:<16} {len(animation.frames):>4} frames, "
+                  f"{blocks:>5} blocks, {blocks * 0.015:>4.0f}s to send",
+                  flush=True)
+            kb.upload_animation(animation)
+            index += 1
+            time.sleep(max(0.0, args.every - blocks * 0.015))
+
+
 def cmd_pattern(args: argparse.Namespace) -> int:
     """Upload one of the animations the program generates itself."""
     from . import patterns
 
     if args.name is None:
-        catalogue = patterns.catalogue()
+        catalogue = patterns.catalogue(with_overall=True)
         width = max(len(n) for n in catalogue)
         for name, label in catalogue.items():
             print(f"{name:<{width}}  {label}")
@@ -486,6 +568,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds per mode with --auto (default 4)")
     es.set_defaults(func=cmd_effect_scan)
 
+    u = sub.add_parser(
+        "install-udev", help="install the udev rule the keyboard needs")
+    u.add_argument("--force", action="store_true",
+                   help="install it again even if it is already there")
+    u.set_defaults(func=cmd_install_udev)
+
     m = sub.add_parser(
         "meter", help="put this machine's AI token usage on the strip")
     m.add_argument("--watch", type=float, metavar="SECONDS",
@@ -493,15 +581,30 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--frames-each", type=int, default=1, dest="frames_each",
                    help="frames per panel (default 1)")
     m.add_argument("--brightness", type=int, default=100, help="0-100")
-    m.add_argument("--speed", type=int, help="1-100; omit for the default")
+    m.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
+                   help="1-100; the default plays at the rate the vendor's "
+                        "own designs assume (~100 ms a frame)")
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
+
+    ro = sub.add_parser(
+        "rotate", help="change the effect every few minutes, while this runs")
+    ro.add_argument("names", nargs="*", help="which ones; default is all")
+    ro.add_argument("--every", type=float, default=300,
+                    metavar="SECONDS", help="seconds per effect (default 300)")
+    ro.add_argument("--shuffle", action="store_true")
+    ro.add_argument("--brightness", type=int, default=100, help="0-100")
+    ro.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
+                    help="1-100; the default is the vendor's own rate")
+    ro.set_defaults(func=cmd_rotate)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
     pt.add_argument("name", nargs="?",
                     help="which one; omit to list them")
     pt.add_argument("--brightness", type=int, default=100, help="0-100")
-    pt.add_argument("--speed", type=int, help="1-100; omit for the default")
+    pt.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
+                   help="1-100; the default plays at the rate the vendor's "
+                        "own designs assume (~100 ms a frame)")
     pt.add_argument("--dry-run", action="store_true")
     pt.set_defaults(func=cmd_pattern)
 
@@ -511,7 +614,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep every nth frame (default 1)")
     i.add_argument("--frames", type=int, help="stop after this many frames")
     i.add_argument("--brightness", type=int, default=100, help="0-100")
-    i.add_argument("--speed", type=int, help="1-100; omit for the default")
+    i.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
+                   help="1-100; the default plays at the rate the vendor's "
+                        "own designs assume (~100 ms a frame)")
     i.add_argument("--dry-run", action="store_true")
     i.set_defaults(func=cmd_image)
 

@@ -404,3 +404,79 @@ class TheShippedEffects(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             patterns.build("does-not-exist")
         self.assertIn("aquarium", str(caught.exception))
+
+
+class Overall(unittest.TestCase):
+    """The effect that plays all the others from one upload."""
+
+    def test_it_fits_what_the_keyboard_holds(self):
+        frames = patterns.overall()
+        self.assertLessEqual(len(frames), matrix.MAX_FRAMES_ANIMATION)
+        matrix.Animation(frames=frames).payload()
+
+    def test_every_effect_gets_a_turn(self):
+        """Each contributes its share, or all of it if it is shorter.
+
+        Pac-chase is two frames and the sound bars are three, so the
+        total is not simply the share times the count.
+        """
+        names = list(patterns.catalogue())
+        share = matrix.MAX_FRAMES_ANIMATION // len(names)
+        expected = sum(min(share, len(patterns.build(name))) for name in names)
+        self.assertEqual(len(patterns.overall()), expected)
+        self.assertGreater(expected, share)        # more than one got in
+
+    def test_it_is_not_one_of_its_own_ingredients(self):
+        # Building it from a list that contains it is a recursion, not
+        # an animation.
+        self.assertNotIn(patterns.OVERALL, patterns.catalogue())
+        self.assertIn(patterns.OVERALL, patterns.catalogue(with_overall=True))
+        frames = patterns.overall(names=list(patterns.catalogue(True)))
+        self.assertTrue(frames)
+
+    def test_a_short_effect_is_shown_whole(self):
+        frames = patterns.overall(limit=200, names=["pacman", "tetris"])
+        pacman = patterns.build("pacman")
+        self.assertEqual([list(f.pixels) for f in frames[:len(pacman)]],
+                         [list(f.pixels) for f in pacman])
+
+    def test_a_long_one_is_sampled_rather_than_cut_short(self):
+        # What shows should be the whole of it played quickly, so the
+        # last frame of the share comes from near the end of the source.
+        long_one = max(patterns.bundled(),
+                       key=lambda key: patterns.bundled()[key]["frames"])
+        source = patterns.build(long_one)
+        frames = patterns.overall(limit=20, names=[long_one])
+        self.assertEqual(list(frames[-1].pixels),
+                         list(source[round(19 * len(source) / 20)].pixels))
+
+    def test_too_few_frames_for_the_list_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.overall(limit=3, names=list(patterns.catalogue()))
+
+    def test_nothing_to_show_is_refused(self):
+        with self.assertRaises(ValueError):
+            patterns.overall(names=[patterns.OVERALL])
+
+    def test_build_knows_it_by_name(self):
+        self.assertTrue(patterns.build(patterns.OVERALL))
+
+
+class SpeedMapping(unittest.TestCase):
+    """Calibrated by eye against a library GIF, which is 100 ms a frame."""
+
+    def test_the_native_setting_is_about_a_hundred_milliseconds(self):
+        self.assertAlmostEqual(matrix.frame_ms(matrix.NATIVE_SPEED), 100,
+                               delta=2)
+
+    def test_the_scale_runs_backwards(self):
+        self.assertLess(matrix.frame_ms(100), matrix.frame_ms(1))
+
+    def test_a_duration_round_trips(self):
+        for ms in (20, 50, 100, 140):
+            self.assertAlmostEqual(
+                matrix.frame_ms(matrix.speed_for_ms(ms)), ms, delta=2)
+
+    def test_asking_for_the_impossible_clamps(self):
+        self.assertGreaterEqual(matrix.speed_for_ms(0), 1)
+        self.assertLessEqual(matrix.speed_for_ms(10_000), 100)

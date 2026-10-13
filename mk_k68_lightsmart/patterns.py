@@ -13,7 +13,7 @@ import json
 import random
 from pathlib import Path
 
-from .matrix import COLS, FRAME_BYTES, LEDS, ROWS, Frame
+from .matrix import COLS, FRAME_BYTES, LEDS, MAX_FRAMES_ANIMATION, ROWS, Frame
 
 #: Where the shipped animations live, as the bytes the keyboard is sent.
 EFFECTS_DIR = Path(__file__).resolve().parent / "effects"
@@ -421,6 +421,44 @@ def meter(readings, frames_each: int = 1) -> list[Frame]:
     return frames
 
 
+#: The name of the effect that plays all the others.
+OVERALL = "overall"
+
+
+def overall(limit: int = MAX_FRAMES_ANIMATION,
+            names: list[str] | None = None) -> list[Frame]:
+    """Every effect in turn, inside a single upload.
+
+    The keyboard holds 941 frames, which at the rate its own designs
+    assume is about ninety seconds of playback *in total* -- so this is
+    a showcase, not a schedule: each effect gets an equal share, around
+    four seconds, and the whole thing loops without the host being
+    involved at all.
+
+    Where an effect has more frames than its share, they are sampled
+    evenly, so what shows is the whole of it played quickly rather than
+    the first few seconds of it.
+    """
+    chosen = [name for name in (names or catalogue()) if name != OVERALL]
+    if not chosen:
+        raise ValueError("nothing to show")
+    if limit < len(chosen):
+        raise ValueError(f"{limit} frames cannot hold {len(chosen)} effects")
+
+    share = limit // len(chosen)
+    out: list[Frame] = []
+    for name in chosen:
+        frames = build(name)
+        take = min(share, len(frames))
+        if take == len(frames):
+            out.extend(frames)
+            continue
+        for index in range(take):
+            at = min(len(frames) - 1, round(index * len(frames) / take))
+            out.append(frames[at])
+    return out[:limit]
+
+
 #: The animations this module generates, by name.
 GENERATED: dict[str, str] = {
     "tetris": "Tetris — pieces falling in until the strip is a wall",
@@ -463,11 +501,18 @@ def load_bundled(key: str) -> list[Frame]:
             for at in range(0, len(raw), FRAME_BYTES)]
 
 
-def catalogue() -> dict[str, str]:
-    """Everything the UI and the CLI offer: generated first, then shipped."""
+def catalogue(with_overall: bool = False) -> dict[str, str]:
+    """Everything the UI and the CLI offer: generated first, then shipped.
+
+    ``overall`` is left out by default because it is built *from* this
+    list, and including it in its own ingredients is how you get a
+    recursion rather than an animation.
+    """
     out = dict(GENERATED)
     for key, entry in bundled().items():
         out[key] = f"{entry['title']} — {entry['frames']} frames"
+    if with_overall:
+        out[OVERALL] = "Overall — every effect in turn, in one upload"
     return out
 
 
@@ -477,6 +522,8 @@ BUILT_INS = GENERATED
 
 def build(name: str) -> list[Frame]:
     """Frames for anything in :func:`catalogue`."""
+    if name == OVERALL:
+        return overall()
     if name == "tetris":
         return tetris_fill()
     if name == "runner":

@@ -210,10 +210,15 @@ class SetupScreen(unittest.TestCase):
     def test_a_snap_install_points_at_the_snap(self):
         # $SNAP is read-only and mounted elsewhere, so the path printed
         # has to be the one the running process can see.
+        from mk_k68_lightsmart import transport
         with unittest.mock.patch.dict(os.environ, {"SNAP": "/snap/x/current"}):
-            self.assertTrue(
-                gui._installed_rule_source().as_posix().startswith("/snap/x/current")
-            )
+            self.assertTrue(transport.rule_source().startswith("/snap/x/current"))
+
+    def test_the_commands_are_the_ones_the_cli_runs(self):
+        from mk_k68_lightsmart import transport
+        text = self.page.command_text()
+        for command in transport.install_rule_commands():
+            self.assertIn(command[0], text)
 
     def test_every_row_reports_a_checked_condition(self):
         self.page.refresh("/dev/hidraw9", True)

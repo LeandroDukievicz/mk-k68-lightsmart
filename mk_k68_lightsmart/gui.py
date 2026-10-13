@@ -12,7 +12,15 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QPointF,
+    QProcess,
+    QRectF,
+    QStandardPaths,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -442,7 +450,9 @@ class MatrixPage(QWidget):
         speed.addWidget(caption("Speed"))
         self.speed = QSlider(Qt.Horizontal)
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
-        self.speed.setValue(50)
+        # The rate the vendor's own designs assume, which is what the
+        # shipped effects were drawn at.
+        self.speed.setValue(matrix.NATIVE_SPEED)
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)
         speed.addWidget(self.speed)
@@ -464,7 +474,7 @@ class MatrixPage(QWidget):
         built_in = QHBoxLayout()
         built_in.addWidget(caption("Built in"))
         self.built_in = QComboBox()
-        for name, label in patterns.catalogue().items():
+        for name, label in patterns.catalogue(with_overall=True).items():
             self.built_in.addItem(label, name)
         self.built_in.setStyleSheet(
             "QComboBox { background:#0a2444; color:#cfe3ff; border:1px solid #0d3a6b;"
@@ -869,11 +879,14 @@ class SetupPage(QWidget):
     commands, rather than making someone read a README to learn that.
     """
 
-    #: Where the rule has to live, and the prefix that makes it work.
-    RULE_NAME = "60-mk-k68-lightsmart.rules"
-    RULE_DIR = "/etc/udev/rules.d"
+    #: Where the rule has to live; the names come from the transport,
+    #: which is what fails without it.
+    RULE_NAME = transport.RULE_NAME
+    RULE_DIR = transport.RULE_DIR
 
     look_again = Signal()
+    #: a note for the window's status bar
+    status = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -907,6 +920,8 @@ class SetupPage(QWidget):
         cl.addWidget(self.commands)
 
         row = QHBoxLayout()
+        self.install_button = primary_button("Install the rule…", self.install)
+        row.addWidget(self.install_button)
         row.addWidget(ghost_button("Copy the commands", self.copy_commands))
         row.addWidget(ghost_button("Check again", self.look_again.emit))
         row.addStretch()
@@ -918,7 +933,46 @@ class SetupPage(QWidget):
 
     # -- state ----------------------------------------------------------
     def rule_installed(self) -> bool:
-        return os.path.exists(os.path.join(self.RULE_DIR, self.RULE_NAME))
+        return transport.rule_installed()
+
+    # -- doing it for them ----------------------------------------------
+    def install(self) -> None:
+        """Run the three commands under a graphical password prompt.
+
+        pkexec rather than sudo: there is no terminal to type into, and
+        the alternative is telling someone to go and find one.
+        """
+        helper = QStandardPaths.findExecutable("pkexec")
+        if not helper:
+            QMessageBox.information(
+                self, "Run it in a terminal",
+                "pkexec is not installed, so the rule cannot be put in "
+                "place from here.\n\nRun this instead:\n\n"
+                "    mk-k68-lightsmart install-udev"
+            )
+            return
+
+        script = " && ".join(
+            " ".join(part for part in command)
+            for command in transport.install_rule_commands()
+        )
+        self.install_button.setEnabled(False)
+        self.status.emit("installing the rule — answer the password prompt…")
+
+        self._install = QProcess(self)
+        self._install.finished.connect(self._installed)
+        self._install.start(helper, ["sh", "-c", script])
+
+    def _installed(self, code: int, _status) -> None:
+        self.install_button.setEnabled(True)
+        if code:
+            # 126 is pkexec's "the dialog was dismissed".
+            self.status.emit("the rule was not installed"
+                             + (" — cancelled" if code == 126 else
+                                f" (exit {code})"))
+        else:
+            self.status.emit("rule installed — looking for the keyboard…")
+            self.look_again.emit()
 
     def refresh(self, device_status: str, connected: bool) -> None:
         """Redraw from the three things that have to be true."""
@@ -941,26 +995,14 @@ class SetupPage(QWidget):
         return f'<span style="color:{colour}">{mark}</span>&nbsp; {text}'
 
     def command_text(self) -> str:
-        source = str(_installed_rule_source())
-        return (
-            f"sudo cp {source} {self.RULE_DIR}/\n"
-            "sudo udevadm control --reload-rules\n"
-            "sudo udevadm trigger --action=add --subsystem-match=hidraw"
+        """The same three commands, for a terminal."""
+        return "\n".join(
+            "sudo " + " ".join(command)
+            for command in transport.install_rule_commands()
         )
 
     def copy_commands(self) -> None:
         QApplication.clipboard().setText(self.command_text())
-
-
-def _installed_rule_source() -> Path:
-    """Where this install keeps its copy of the udev rule.
-
-    A snap is read-only and mounted somewhere else entirely, so the
-    path printed has to be the one this process can actually see.
-    """
-    snap = os.environ.get("SNAP")
-    root = Path(snap) if snap else Path(__file__).resolve().parent.parent
-    return root / "udev" / SetupPage.RULE_NAME
 
 
 class MainWindow(QMainWindow):
@@ -1020,9 +1062,11 @@ class MainWindow(QMainWindow):
         built = {0: self._build_home(), 3: self.light_page,
                  7: self.matrix_page}
         for index in range(len(self.NAV)):
-            self.pages.addWidget(built.get(index) or self._build_placeholder())
+            self.pages.addWidget(
+                built.get(index) or self._build_placeholder(index))
         self.setup_page = SetupPage()
         self.setup_page.look_again.connect(self.reconnect)
+        self.setup_page.status.connect(self.set_status)
         self.pages.addWidget(self.setup_page)
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
@@ -1248,13 +1292,61 @@ class MainWindow(QMainWindow):
         row.addStretch()
         return row
 
-    def _build_placeholder(self) -> QWidget:
+    #: What each unbuilt section is waiting on. "Not built yet" tells
+    #: nobody anything; these say which part of the protocol is missing
+    #: and what already works, so the gap looks measured rather than
+    #: abandoned.
+    PENDING = {
+        1: ("Key remapping",
+            "The block is decoded: 694 bytes, four per key, and the slot "
+            "each key sits in. The encoder is written and tested.\n\n"
+            "Nothing writes it yet. A keymap survives a power cycle, and "
+            "the way back from a wrong one runs through the same untested "
+            "path — so the reset command has to be found first."),
+        2: ("Macros",
+            "The command and its framing are known (0x15, sent in 64-byte "
+            "blocks). The event encoding is not: a key press emits a 0x50 "
+            "marker and two bytes whose meaning is still open."),
+        4: ("User profiles",
+            "The keyboard holds several profiles and the vendor software "
+            "switches between them. Which command does that has not been "
+            "found yet."),
+        5: ("Custom lighting",
+            "Per-key colours already work on the Home screen — this is "
+            "where a whole layout would be painted and stored as a "
+            "profile, which needs the profile commands first."),
+        6: ("Music mode",
+            "The keyboard can react to sound. The host does the listening "
+            "and sends colours, so this needs both an audio capture and "
+            "the command the vendor app uses, neither of which is done."),
+    }
+
+    def _build_placeholder(self, index: int = -1) -> QWidget:
+        title, detail = self.PENDING.get(
+            index, ("Not built yet", "This section has no screen yet."))
+
         page = QWidget()
         lay = QVBoxLayout(page)
-        lb = QLabel("Not built yet.")
-        lb.setAlignment(Qt.AlignCenter)
-        lb.setStyleSheet(f"color: {MUTED.name()}; font-size: 13px;")
-        lay.addWidget(lb)
+        lay.setContentsMargins(20, 14, 20, 14)
+        card = Card()
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 18, 20, 18)
+        inner.setSpacing(10)
+
+        heading = QLabel(title)
+        heading.setStyleSheet("color:#cfe3ff; font-size:13px; font-weight:bold;")
+        inner.addWidget(heading)
+
+        body = QLabel(detail)
+        body.setWordWrap(True)
+        body.setStyleSheet(f"color: {MUTED.name()}; font-size: 12px;")
+        inner.addWidget(body)
+
+        link = QLabel("The state of every part is in docs/PROTOCOL.md.")
+        link.setStyleSheet("color:#44607f; font-size: 11px;")
+        inner.addWidget(link)
+        lay.addWidget(card)
+        lay.addStretch()
         return page
 
     # -- behaviour ------------------------------------------------------

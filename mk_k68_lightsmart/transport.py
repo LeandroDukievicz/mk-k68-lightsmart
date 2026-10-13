@@ -134,6 +134,38 @@ def _parse_report_descriptor(blob: bytes) -> tuple[int, int] | None:
     return None
 
 
+#: The udev rule, without which the control interface is root-only.
+#: The `60-` prefix is load-bearing: the rule tags the device `uaccess`
+#: and the builtin that acts on the tag runs from `70-uaccess.rules`.
+RULE_NAME = "60-mk-k68-lightsmart.rules"
+RULE_DIR = "/etc/udev/rules.d"
+
+
+def rule_source() -> str:
+    """This installation's copy of the rule.
+
+    A snap is read-only and mounted somewhere else entirely, so the
+    path has to be the one this process can actually see.
+    """
+    snap = os.environ.get("SNAP")
+    root = snap if snap else os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))
+    return os.path.join(root, "udev", RULE_NAME)
+
+
+def rule_installed() -> bool:
+    return os.path.exists(os.path.join(RULE_DIR, RULE_NAME))
+
+
+def install_rule_commands() -> list[list[str]]:
+    """The three commands that put the rule in place."""
+    return [
+        ["install", "-m", "644", rule_source(), RULE_DIR + "/"],
+        ["udevadm", "control", "--reload-rules"],
+        ["udevadm", "trigger", "--action=add", "--subsystem-match=hidraw"],
+    ]
+
+
 def keyboard_present() -> bool:
     """Whether any interface of this keyboard is on the bus at all.
 

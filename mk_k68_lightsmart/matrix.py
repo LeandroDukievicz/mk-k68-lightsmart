@@ -45,6 +45,17 @@ DEFAULT_SPEED = 0x50
 #: A layer's 1..100 speed setting is sent as this minus the setting.
 SPEED_BASE = 0x66
 
+#: Roughly how long the firmware holds a frame, per unit of the wire
+#: value. Calibrated by eye rather than measured: at wire 66 a library
+#: animation runs at the pace of the GIF it came from, and those are
+#: authored at 100 ms a frame. The three other points agree -- wire 80
+#: reads slow, 52 reads fast, 2 is a blur -- so the byte is a delay and
+#: this is its unit, give or take.
+MS_PER_SPEED_UNIT = 100 / 66
+
+#: The setting that plays at the rate the vendor's own designs assume.
+NATIVE_SPEED = SPEED_BASE - 66
+
 BLOCK = 64
 
 # The fast encode path reads an array("I") as four bytes per pixel.
@@ -170,6 +181,21 @@ def speed_to_byte(setting: int | None) -> int:
     if setting is None:
         return DEFAULT_SPEED
     return SPEED_BASE - max(0, min(100, setting))
+
+
+def speed_for_ms(milliseconds: float) -> int:
+    """The 1-100 setting that holds a frame for about that long.
+
+    The scale is inverted and short -- the whole usable range is about
+    3 ms to 150 ms a frame -- so this clamps rather than pretending.
+    """
+    wire = max(1, min(SPEED_BASE - 1, round(milliseconds / MS_PER_SPEED_UNIT)))
+    return SPEED_BASE - wire
+
+
+def frame_ms(setting: int | None) -> float:
+    """About how long a frame lasts at ``setting``."""
+    return speed_to_byte(setting) * MS_PER_SPEED_UNIT
 
 
 @dataclass
