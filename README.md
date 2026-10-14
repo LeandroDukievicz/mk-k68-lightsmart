@@ -233,10 +233,11 @@ as one animation — up to the firmware's 941.
 - **Add**, **Duplicate**, **Delete**, **Clear this frame**.
 - **Play** previews the animation in the window at the rate the slider
   asks the keyboard for. Loading a shipped effect, or importing a GIF,
-  moves the slider to the delay that source was drawn at — a 100 ms GIF
+  moves the slider to the delay that source was drawn at: a 100 ms GIF
   plays at 100 ms, and one thinned to every third frame asks for 300,
-  which is past the end of the scale and said so rather than silently
-  run fast.
+  since each frame kept has to cover the two dropped beside it. When a
+  source wants longer than the scale reaches, the status line says so
+  rather than letting the strip run fast without explanation.
 - **The rate wants measuring once per keyboard.** Everything the
   program says about frame rate comes from one number — milliseconds
   per unit of the speed byte — and it was originally eyeballed rather

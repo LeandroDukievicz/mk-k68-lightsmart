@@ -69,10 +69,6 @@ SPEED_BASE = 0x66
 #: measurement when there is one.
 FALLBACK_MS_PER_SPEED_UNIT = 12.121
 
-#: Kept so existing callers and tests still have a number to name. The
-#: functions do not read it; they read :func:`ms_per_speed_unit`.
-MS_PER_SPEED_UNIT = FALLBACK_MS_PER_SPEED_UNIT
-
 #: Where a measurement is kept, next to the schemes file.
 CALIBRATION_FILE = "calibration.json"
 
