@@ -368,3 +368,109 @@ class LightScreen(unittest.TestCase):
             self.assertEqual(sent[-1][0], effect.mode, effect.name)
             self.assertEqual(sent[-1][2], 1, effect.name)
             self.assertEqual(sent[-1][4], 14, effect.name)
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class PlaybackRate(unittest.TestCase):
+    """The strip and the preview have to be asked for the same rate.
+
+    They disagreed because the page sent the keyboard a speed nobody
+    had chosen -- a boosted default -- while the preview timed itself
+    off the same number. Both now come from the source's own delay.
+    """
+
+    def setUp(self) -> None:
+        self.page = gui.MatrixPage(lambda: QColor("#ffffff"))
+
+    def test_the_preview_is_paced_by_the_slider(self):
+        self.page.set_speed(matrix.speed_for_ms(100))
+        self.assertAlmostEqual(
+            self.page._interval_ms(self.page.speed.value()), 100, delta=2)
+
+    def test_the_upload_carries_what_the_preview_played(self):
+        self.page.set_speed(matrix.speed_for_ms(100))
+        self.assertEqual(self.page.animation().speed, self.page.speed.value())
+
+    def test_a_setting_outside_the_scale_is_clamped_not_sent(self):
+        for asked in (-20, 0, 500):
+            self.page.set_speed(asked)
+            self.assertTrue(
+                self.page.SPEED_MIN
+                <= self.page.speed.value() <= self.page.SPEED_MAX, asked)
+
+    def test_loading_a_shipped_gif_takes_the_rate_it_was_drawn_at(self):
+        from mk_k68_lightsmart import patterns
+        if "matrix-plus" not in patterns.bundled():
+            self.skipTest("effects were not converted in this checkout")
+        index = self.page.built_in.findData("matrix-plus")
+        self.assertGreaterEqual(index, 0, "Code plus should be offered")
+        self.page.built_in.setCurrentIndex(index)
+        self.page.load_built_in()
+        self.assertEqual(self.page.speed.value(),
+                         patterns.source_speed("matrix-plus"))
+        # 13 frames of a 100 ms GIF, kept whole, so 100 ms a frame.
+        self.assertAlmostEqual(
+            matrix.frame_ms(self.page.speed.value()), 100, delta=2)
+
+    def test_a_generated_animation_takes_the_default(self):
+        index = self.page.built_in.findData("tetris")
+        self.page.built_in.setCurrentIndex(index)
+        self.page.load_built_in()
+        self.assertEqual(self.page.speed.value(),
+                         matrix.DEFAULT_PLAYBACK_SPEED)
+
+    def test_an_unreachable_rate_is_said_out_loud(self):
+        # A GIF thinned to every third frame wants 300 ms a frame, which
+        # is past the end of the scale. Silence there would look like a
+        # bug in the strip.
+        self.assertIn("stops at", self.page._rate_note(100, stride=3))
+        self.assertEqual(self.page._rate_note(100, stride=1), "")
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class ImportingKeepsTheFilesRate(unittest.TestCase):
+    """An imported file brings its own frame delay, and it is honoured."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self.page = gui.MatrixPage(lambda: QColor("#ffffff"))
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "tiny.gif")
+        with open(self.path, "wb") as fh:
+            fh.write(ImportingAPicture.TINY_GIF)
+
+    def test_the_slider_moves_to_the_gifs_own_delay(self):
+        self.page.set_speed(self.page.SPEED_MAX)        # somewhere else first
+        with unittest.mock.patch.object(
+            gui.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a, **k: (self.path, ""))
+        ):
+            self.page.import_image()
+        # The fixture is a 100 ms GIF, as test_image checks.
+        self.assertEqual(self.page.speed.value(), matrix.speed_for_source(100))
+        self.assertAlmostEqual(
+            matrix.frame_ms(self.page.speed.value()), 100, delta=2)
+
+    def test_a_thinned_import_is_held_for_the_frames_it_replaces(self):
+        peek = gui.image.Imported(frames=[matrix.Frame()], available=312,
+                                  delay_ms=100, size=(700, 70))
+        thinned = gui.image.Imported(
+            frames=[matrix.Frame(), matrix.Frame()], available=312,
+            delay_ms=100, size=(700, 70), stride=3)
+        notes = []
+        self.page.status.connect(notes.append)
+        with unittest.mock.patch.object(
+            gui.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a, **k: (self.path, ""))
+        ), unittest.mock.patch.object(
+            gui.image, "load", side_effect=[peek, thinned]
+        ), unittest.mock.patch.object(
+            gui.QInputDialog, "getInt",
+            staticmethod(lambda *a, **k: (3, True))
+        ):
+            self.page.import_image()
+        # 300 ms a frame is past the end of the scale, so the page takes
+        # the slowest it has and says why rather than drifting quietly.
+        self.assertEqual(self.page.speed.value(), matrix.speed_for_ms(300))
+        self.assertIn("stops at", notes[-1])

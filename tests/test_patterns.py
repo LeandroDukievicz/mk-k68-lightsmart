@@ -481,13 +481,64 @@ class SpeedMapping(unittest.TestCase):
         self.assertGreaterEqual(matrix.speed_for_ms(0), 1)
         self.assertLessEqual(matrix.speed_for_ms(10_000), 100)
 
-    def test_the_default_is_boosted_past_the_native_rate(self):
-        # The wire value is a whole number of delay units, so the boost
-        # lands near 1.25 rather than on it -- the next step down the
-        # scale would be 1.27.
-        boost = (matrix.frame_ms(matrix.NATIVE_SPEED)
-                 / matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED))
-        self.assertAlmostEqual(boost, matrix.PLAYBACK_BOOST, delta=0.02)
+    def test_the_default_is_the_native_rate(self):
+        # Not a multiple of it. A boosted default is what made the
+        # strip disagree with the preview of the same frames, and it
+        # also moved every upload off the one wire value that was ever
+        # checked against a running GIF.
+        self.assertEqual(matrix.DEFAULT_PLAYBACK_SPEED, matrix.NATIVE_SPEED)
+
+    def test_a_source_plays_at_the_delay_it_carries(self):
+        self.assertAlmostEqual(
+            matrix.frame_ms(matrix.speed_for_source(100)), 100, delta=2)
+        self.assertAlmostEqual(
+            matrix.frame_ms(matrix.speed_for_source(40)), 40, delta=2)
+
+    def test_thinning_asks_for_the_time_the_skipped_frames_held(self):
+        # Every third frame of a 100 ms GIF stands in for 300 ms of it,
+        # so each survivor is asked to cover all three.
+        self.assertEqual(matrix.source_ms(100, stride=3), 300)
+        self.assertEqual(matrix.speed_for_source(100, stride=3),
+                         matrix.speed_for_ms(300))
+
+    def test_the_scale_cannot_reach_a_thinned_gifs_pace(self):
+        # 300 ms a frame is past the end of the scale -- one byte of
+        # delay units stops at slowest_frame_ms() -- so the setting
+        # clamps, and callers are told rather than left to assume.
+        self.assertFalse(matrix.source_rate_is_reachable(100, stride=3))
+        self.assertAlmostEqual(
+            matrix.frame_ms(matrix.speed_for_source(100, stride=3)),
+            matrix.slowest_frame_ms(), delta=0.01)
+
+    def test_a_rate_inside_the_scale_is_reachable(self):
+        self.assertTrue(matrix.source_rate_is_reachable(100))
+        self.assertTrue(matrix.source_rate_is_reachable(0))     # no delay
+        self.assertFalse(matrix.source_rate_is_reachable(1))    # too quick
+
+    def test_a_source_with_no_delay_falls_back_to_the_default(self):
+        for delay in (0, -5):
+            self.assertEqual(matrix.speed_for_source(delay),
+                             matrix.DEFAULT_PLAYBACK_SPEED)
+
+
+class ShippedEffectRates(unittest.TestCase):
+    """Each shipped effect plays at the pace of the GIF it came from."""
+
+    def test_every_shipped_effect_names_its_own_rate(self):
+        for key, entry in patterns.bundled().items():
+            want = matrix.speed_for_source(entry["delay_ms"], entry["stride"])
+            self.assertEqual(patterns.source_speed(key), want, key)
+
+    def test_code_plus_plays_at_the_gifs_hundred_milliseconds(self):
+        if "matrix-plus" not in patterns.bundled():
+            self.skipTest("effects were not converted in this checkout")
+        self.assertAlmostEqual(
+            matrix.frame_ms(patterns.source_speed("matrix-plus")),
+            100, delta=2)
+
+    def test_a_generated_animation_takes_the_default(self):
+        self.assertEqual(patterns.source_speed("tetris"),
+                         matrix.DEFAULT_PLAYBACK_SPEED)
 
     def test_the_default_is_a_setting_the_keyboard_accepts(self):
         self.assertTrue(1 <= matrix.DEFAULT_PLAYBACK_SPEED <= 100)
@@ -495,3 +546,64 @@ class SpeedMapping(unittest.TestCase):
         self.assertEqual(
             matrix.speed_to_byte(matrix.DEFAULT_PLAYBACK_SPEED),
             matrix.SPEED_BASE - matrix.DEFAULT_PLAYBACK_SPEED)
+
+
+class Calibration(unittest.TestCase):
+    """The frame rate is a measurement, not a constant, so it persists."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.env = unittest.mock.patch.dict(
+            "os.environ", {"XDG_CONFIG_HOME": self.dir.name})
+        self.env.start()
+        matrix.reload_calibration()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.env.stop()
+        self.dir.cleanup()
+        matrix.reload_calibration()
+
+    def test_without_a_reading_the_guess_is_used_and_said_to_be_one(self):
+        self.assertFalse(matrix.is_calibrated())
+        self.assertEqual(matrix.ms_per_speed_unit(),
+                         matrix.FALLBACK_MS_PER_SPEED_UNIT)
+
+    def test_a_saved_reading_outlives_the_cache(self):
+        matrix.save_calibration(4.5)
+        matrix.reload_calibration()
+        self.assertTrue(matrix.is_calibrated())
+        self.assertAlmostEqual(matrix.ms_per_speed_unit(), 4.5, places=3)
+
+    def test_a_reading_moves_the_whole_scale(self):
+        matrix.set_ms_per_speed_unit(5.0)
+        # The wire value is unchanged; what it is believed to mean is not.
+        self.assertEqual(matrix.speed_to_byte(36), 66)
+        self.assertAlmostEqual(matrix.frame_ms(36), 330, delta=1)
+        self.assertAlmostEqual(matrix.slowest_frame_ms(), 505, delta=1)
+
+    def test_a_reading_is_what_picks_a_gifs_setting(self):
+        # The point of measuring: a 100 ms GIF asks for a different
+        # setting once the firmware's real pace is known.
+        matrix.set_ms_per_speed_unit(matrix.FALLBACK_MS_PER_SPEED_UNIT)
+        guessed = matrix.speed_for_source(100)
+        matrix.set_ms_per_speed_unit(5.0)
+        self.assertNotEqual(matrix.speed_for_source(100), guessed)
+        self.assertAlmostEqual(
+            matrix.frame_ms(matrix.speed_for_source(100)), 100, delta=5)
+
+    def test_an_implausible_reading_is_refused(self):
+        for bad in (0, -1, 500):
+            with self.assertRaises(ValueError):
+                matrix.set_ms_per_speed_unit(bad)
+
+    def test_a_corrupt_file_means_not_measured_rather_than_a_crash(self):
+        path = matrix._calibration_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for junk in ("", "{", '{"ms_per_speed_unit": "fast"}',
+                     '{"ms_per_speed_unit": 9999}', "{}"):
+            path.write_text(junk, encoding="utf-8")
+            matrix.reload_calibration()
+            self.assertFalse(matrix.is_calibrated(), junk)
+            self.assertEqual(matrix.ms_per_speed_unit(),
+                             matrix.FALLBACK_MS_PER_SPEED_UNIT, junk)

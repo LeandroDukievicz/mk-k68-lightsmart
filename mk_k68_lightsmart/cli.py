@@ -214,6 +214,135 @@ def probe_frame() -> matrix.Frame:
     return frame
 
 
+def blink_frames(count: int, colour: int = 0xFFFFFF) -> list[matrix.Frame]:
+    """``count`` frames, the first lit and the rest dark.
+
+    A whole-strip flash once per loop, which is the one event in an
+    animation that can be timed by hand: it needs no guess about where
+    a moving dot is, and 325 LEDs going on at once is visible however
+    briefly the frame is held.
+    """
+    if count < 2:
+        raise ValueError("a blink needs at least two frames")
+    lit = fill_frame(colour)
+    return [lit] + [matrix.Frame() for _ in range(count - 1)]
+
+
+def _other_users_of(path: str) -> list[int]:
+    """PIDs holding ``path`` open, this process aside.
+
+    The GUI and this CLI write the same hidraw node and overwrite each
+    other, which has invalidated measurements before. Cheap to check,
+    so it is checked rather than warned about in prose.
+    """
+    held = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit() or entry.name == str(os.getpid()):
+            continue
+        fds = os.path.join(entry.path, "fd")
+        try:
+            for fd in os.scandir(fds):
+                try:
+                    if os.readlink(fd.path) == path:
+                        held.append(int(entry.name))
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue        # not ours to look at, or gone already
+    return held
+
+
+def cmd_calibrate_speed(args: argparse.Namespace) -> int:
+    """Measure how long the firmware really holds a frame.
+
+    Everything the program says about playback rate comes from one
+    number -- milliseconds per unit of the speed byte -- and that number
+    was eyeballed, not measured. When it is wrong the preview and the
+    strip disagree, because the preview uses it to pick its own timer
+    while the keyboard uses the byte it implies.
+
+    So: upload an animation that flashes once per loop, let the loop be
+    timed against the host's clock, and divide. The flash count does the
+    work that a steady hand cannot -- timing several loops in one
+    interval divides the reaction error by the number of loops.
+
+    Worth running twice at different ``--speed`` values. Two readings
+    that agree say the byte is a plain delay; two that disagree say
+    there is a fixed cost per frame on top of it, and the model needs
+    more than one number.
+    """
+    frames = blink_frames(args.frames)
+    wire = matrix.speed_to_byte(args.speed)
+    animation = matrix.Animation(
+        frames=frames, brightness=args.brightness, speed=args.speed
+    )
+
+    try:
+        held = _other_users_of(transport.find_control_device())
+    except DeviceNotFound:
+        held = []
+    print(f"frames        : {args.frames} (one lit, the rest dark)")
+    print(f"speed         : setting {args.speed}, wire value {wire}")
+    print(f"guessed loop  : {len(frames) * matrix.frame_ms(args.speed) / 1000:.1f}s"
+          f"  (at the current {matrix.ms_per_speed_unit():.3f} ms a unit)")
+    if held:
+        print(f"warning       : pids {held} also hold the device open; "
+              "close the GUI first or the two will fight")
+    if args.dry_run:
+        print("dry run - nothing sent")
+        return 0
+
+    with protocol.Keyboard() as kb:
+        kb.upload_animation(animation)
+
+    print()
+    print("The strip now flashes once per loop.")
+    print(f"Press Enter on a flash, then again {args.loops} flashes later.")
+    print("(ctrl-c to give up)")
+    try:
+        input("  ready, press Enter on the next flash... ")
+        start = time.monotonic()
+        input(f"  now Enter on flash number {args.loops} after it... ")
+        elapsed = time.monotonic() - start
+    except (EOFError, KeyboardInterrupt):
+        print("\nnothing measured, nothing saved")
+        return 1
+
+    if elapsed <= 0.2:
+        print(f"that was {elapsed:.2f}s -- too quick to be two flashes")
+        return 1
+
+    loop_ms = elapsed * 1000 / args.loops
+    frame_ms = loop_ms / args.frames
+    unit = frame_ms / wire
+
+    print()
+    print(f"measured      : {elapsed:.2f}s for {args.loops} loops")
+    print(f"a loop        : {loop_ms:.0f} ms")
+    print(f"a frame       : {frame_ms:.1f} ms at wire {wire}")
+    print(f"per unit      : {unit:.3f} ms  "
+          f"(was {matrix.ms_per_speed_unit():.3f})")
+    if not 0.05 <= unit <= 200:
+        print("that is not a plausible reading; nothing saved")
+        return 1
+
+    # What the reading changes, said in the terms the user sees: the
+    # scale's ends, and the setting a 100 ms GIF will ask for.
+    before = matrix.speed_for_ms(100)
+    matrix.set_ms_per_speed_unit(unit)
+    print(f"scale becomes : {matrix.slowest_frame_ms():.0f} ms a frame at the "
+          f"slow end, {matrix.fastest_frame_ms():.1f} ms at the fast end")
+    print(f"a 100 ms GIF  : speed {matrix.speed_for_ms(100)}, "
+          f"where it asked for {before}")
+    if args.save:
+        path = matrix.save_calibration(unit)
+        print(f"saved         : {path}")
+    else:
+        print("not saved     : run again with --save to keep it")
+    return 0
+
+
 def cmd_strip(args: argparse.Namespace) -> int:
     """Upload one still frame to the dot-matrix strip."""
     if args.pattern == "test":
@@ -410,7 +539,8 @@ def cmd_rotate(args: argparse.Namespace) -> int:
             name = names[index % len(names)]
             animation = matrix.Animation(
                 frames=patterns.build(name), brightness=args.brightness,
-                speed=args.speed,
+                speed=(patterns.source_speed(name) if args.speed is None
+                       else args.speed),
             )
             blocks = animation.block_count()
             print(f"{name:<16} {len(animation.frames):>4} frames, "
@@ -433,17 +563,26 @@ def cmd_pattern(args: argparse.Namespace) -> int:
         return 0
 
     frames = patterns.build(args.name)
+    speed = (patterns.source_speed(args.name) if args.speed is None
+             else args.speed)
     animation = matrix.Animation(
-        frames=frames, brightness=args.brightness, speed=args.speed
+        frames=frames, brightness=args.brightness, speed=speed
     )
     blocks = animation.block_count()
     print(f"pattern       : {args.name}")
     print(f"frames        : {len(frames)}")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
-    print(f"playback      : speed {args.speed}, about "
-          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
-          f"{len(frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
+    print(f"playback      : speed {speed}, about "
+          f"{matrix.frame_ms(speed):.0f} ms a frame, "
+          f"{len(frames) * matrix.frame_ms(speed) / 1000:.0f}s a loop")
+    entry = patterns.bundled().get(args.name, {})
+    if (args.speed is None
+            and not matrix.source_rate_is_reachable(entry.get("delay_ms") or 0,
+                                                    entry.get("stride") or 1)):
+        print(f"note          : the source wants "
+              f"{matrix.source_ms(entry['delay_ms'], entry['stride']):.0f} ms "
+              f"a frame; the strip stops at {matrix.slowest_frame_ms():.0f}")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -473,8 +612,10 @@ def cmd_image(args: argparse.Namespace) -> int:
     from . import image as image_module
 
     loaded = image_module.load(args.path, stride=args.stride, limit=args.frames)
+    speed = (matrix.speed_for_source(loaded.delay_ms, args.stride)
+             if args.speed is None else args.speed)
     animation = matrix.Animation(
-        frames=loaded.frames, brightness=args.brightness, speed=args.speed
+        frames=loaded.frames, brightness=args.brightness, speed=speed
     )
     blocks = animation.block_count()
     kept = (f"every {args.stride} of {loaded.available}" if args.stride > 1
@@ -487,9 +628,15 @@ def cmd_image(args: argparse.Namespace) -> int:
     print(f"importing     : {len(loaded.frames)} frames ({kept})")
     print(f"payload       : {blocks} blocks, {blocks * matrix.BLOCK} bytes")
     print(f"estimated     : {blocks * 0.015:.0f}s")
-    print(f"playback      : speed {args.speed}, about "
-          f"{matrix.frame_ms(args.speed):.0f} ms a frame, "
-          f"{len(loaded.frames) * matrix.frame_ms(args.speed) / 1000:.0f}s a loop")
+    print(f"playback      : speed {speed}, about "
+          f"{matrix.frame_ms(speed):.0f} ms a frame, "
+          f"{len(loaded.frames) * matrix.frame_ms(speed) / 1000:.0f}s a loop")
+    if (args.speed is None
+            and not matrix.source_rate_is_reachable(loaded.delay_ms,
+                                                    args.stride)):
+        print(f"note          : the source wants "
+              f"{matrix.source_ms(loaded.delay_ms, args.stride):.0f} ms a "
+              f"frame; the strip stops at {matrix.slowest_frame_ms():.0f}")
     if args.dry_run:
         print("dry run - nothing sent")
         return 0
@@ -662,8 +809,15 @@ def cmd_effects(args: argparse.Namespace) -> int:
 
 def speed_help() -> str:
     """The --speed help, generated so a change of rate cannot stale it."""
-    return (f"1-100; the default is {matrix.PLAYBACK_BOOST:g}x the rate the "
-            f"vendor's own designs assume, about "
+    return (f"1-100; the default is the rate the vendor's own designs "
+            f"assume, about "
+            f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
+
+
+def source_speed_help() -> str:
+    """The --speed help where the source brings a rate of its own."""
+    return ("1-100; omit it to play the source at its own pace, which "
+            f"for these is about "
             f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
 
 
@@ -778,19 +932,33 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="SECONDS", help="seconds per effect (default 300)")
     ro.add_argument("--shuffle", action="store_true")
     ro.add_argument("--brightness", type=int, default=100, help="0-100")
-    ro.add_argument("--speed", type=int,
-                    default=matrix.DEFAULT_PLAYBACK_SPEED,
-                    help=speed_help())
+    ro.add_argument("--speed", type=int, default=None,
+                    help=source_speed_help())
     ro.set_defaults(func=cmd_rotate)
 
     pt = sub.add_parser("pattern", help="upload a built-in animation")
     pt.add_argument("name", nargs="?",
                     help="which one; omit to list them")
     pt.add_argument("--brightness", type=int, default=100, help="0-100")
-    pt.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
-                   help=speed_help())
+    pt.add_argument("--speed", type=int, default=None,
+                   help=source_speed_help())
     pt.add_argument("--dry-run", action="store_true")
     pt.set_defaults(func=cmd_pattern)
+
+    cs = sub.add_parser(
+        "calibrate-speed",
+        help="measure how long the strip really holds a frame")
+    cs.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
+                    help=f"1-100 to measure at (default {matrix.NATIVE_SPEED})")
+    cs.add_argument("--frames", type=int, default=10,
+                    help="frames in the loop (default 10)")
+    cs.add_argument("--loops", type=int, default=5,
+                    help="loops to time in one go (default 5)")
+    cs.add_argument("--brightness", type=int, default=100, help="0-100")
+    cs.add_argument("--save", action="store_true",
+                    help="keep the reading for every later run")
+    cs.add_argument("--dry-run", action="store_true")
+    cs.set_defaults(func=cmd_calibrate_speed)
 
     i = sub.add_parser("image", help="upload an image or GIF to the strip")
     i.add_argument("path", help="any image Qt can read; GIFs animate")
@@ -798,8 +966,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep every nth frame (default 1)")
     i.add_argument("--frames", type=int, help="stop after this many frames")
     i.add_argument("--brightness", type=int, default=100, help="0-100")
-    i.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
-                   help=speed_help())
+    i.add_argument("--speed", type=int, default=None,
+                   help=source_speed_help())
     i.add_argument("--dry-run", action="store_true")
     i.set_defaults(func=cmd_image)
 

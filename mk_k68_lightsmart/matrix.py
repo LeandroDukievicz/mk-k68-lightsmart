@@ -20,6 +20,7 @@ pre-scaled by the layer's brightness.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import struct
 import urllib.parse
@@ -27,6 +28,7 @@ import sys
 from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 COLS = 65
 ROWS = 5
@@ -46,32 +48,126 @@ DEFAULT_SPEED = 0x50
 SPEED_BASE = 0x66
 
 #: Roughly how long the firmware holds a frame, per unit of the wire
-#: value. Calibrated by eye rather than measured: at wire 66 a library
-#: animation runs at the pace of the GIF it came from, and those are
-#: authored at 100 ms a frame. The three other points agree -- wire 80
-#: reads slow, 52 reads fast, 2 is a blur -- so the byte is a delay and
-#: this is its unit, give or take.
-MS_PER_SPEED_UNIT = 100 / 66
+#: value, until someone measures it.
+#:
+#: This number was never measured. It came from watching a library GIF
+#: and deciding wire 66 looked like the 100 ms the GIF was authored at,
+#: and everything the program says about rate is interpolated from that
+#: one eyeballed point. It is wrong in the slow direction -- the strip
+#: steps frame by frame where the preview is fluid -- which is what
+#: `calibrate-speed` exists to replace. Treat it as a starting guess,
+#: not a fact about the firmware.
+#:
+#: Read it through :func:`ms_per_speed_unit`, which prefers a measured
+#: value when the user has taken one.
+FALLBACK_MS_PER_SPEED_UNIT = 100 / 66
+
+#: Kept so existing callers and tests still have a number to name. The
+#: functions do not read it; they read :func:`ms_per_speed_unit`.
+MS_PER_SPEED_UNIT = FALLBACK_MS_PER_SPEED_UNIT
+
+#: Where a measurement is kept, next to the schemes file.
+CALIBRATION_FILE = "calibration.json"
+
+_measured_unit: float | None = None
+_measured_loaded = False
+
+
+def _calibration_path() -> "Path":
+    from .store import config_dir
+    return config_dir() / CALIBRATION_FILE
+
+
+def load_calibration() -> float | None:
+    """The measured ms-per-unit on this machine, if one was taken.
+
+    Missing, unreadable and nonsensical files all mean "not measured"
+    rather than an error: a bad calibration must not stop the program
+    lighting a keyboard.
+    """
+    try:
+        raw = json.loads(_calibration_path().read_text(encoding="utf-8"))
+        value = float(raw["ms_per_speed_unit"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return value if 0.05 <= value <= 200 else None
+
+
+def ms_per_speed_unit() -> float:
+    """How long the firmware holds a frame per unit of the wire value.
+
+    A measurement if there is one, the guess otherwise. Cached, because
+    every label and every upload asks.
+    """
+    global _measured_unit, _measured_loaded
+    if not _measured_loaded:
+        _measured_unit = load_calibration()
+        _measured_loaded = True
+    return (FALLBACK_MS_PER_SPEED_UNIT if _measured_unit is None
+            else _measured_unit)
+
+
+def reload_calibration() -> None:
+    """Drop the cached reading so the next ask looks at the file again.
+
+    The cache exists because every label and every upload asks for the
+    unit; this is how a fresh measurement, or a test's temporary config
+    directory, gets seen without restarting.
+    """
+    global _measured_loaded
+    _measured_loaded = False
+
+
+def is_calibrated() -> bool:
+    """Whether the rate this program reports was ever measured."""
+    ms_per_speed_unit()
+    return _measured_unit is not None
+
+
+def set_ms_per_speed_unit(value: float | None) -> None:
+    """Use ``value`` from now on; ``None`` goes back to the guess.
+
+    In memory only -- :func:`save_calibration` is what outlives the
+    process. Tests use this to pin the scale.
+    """
+    global _measured_unit, _measured_loaded
+    if value is not None and not 0.05 <= value <= 200:
+        raise ValueError("a frame unit outside 0.05..200 ms is not a reading")
+    _measured_unit = value
+    _measured_loaded = True
+
+
+def save_calibration(value: float) -> "Path":
+    """Write a measurement where the next run will find it."""
+    set_ms_per_speed_unit(value)
+    path = _calibration_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"ms_per_speed_unit": round(value, 4)}, indent=1) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 #: The wire value that plays at the rate the vendor's own designs
 #: assume, and the 1-100 setting that sends it.
 NATIVE_WIRE_SPEED = 66
 NATIVE_SPEED = SPEED_BASE - NATIVE_WIRE_SPEED
 
-#: How much faster than that rate the paths that name no speed play.
-#: The native rate is what the designs were drawn at, but read on
-#: sixty-five columns it still crawls, so the default asks for more.
-#: The byte is a frame delay, so the boost divides it. This is the one
-#: number to raise when the strip reads slow, and raising it is all the
-#: next adjustment needs: the help text and the labels are generated
-#: from it, so nothing restates the rate and goes stale.
+#: The setting every path defaults to when the source does not say:
+#: the rate the designs were drawn at.
 #:
-#: 1.5625 is two quarters compounded -- 1.25 read slow, and so did
-#: 1.25 again on top of it.
-PLAYBACK_BOOST = 1.25 * 1.25
-
-#: The setting every path defaults to: the vendor's rate, boosted.
-DEFAULT_PLAYBACK_SPEED = SPEED_BASE - round(NATIVE_WIRE_SPEED / PLAYBACK_BOOST)
+#: This used to be the native rate multiplied by a PLAYBACK_BOOST of
+#: 1.5625, on the reasoning that the native pace crawls across
+#: sixty-five columns. Two things were wrong with that. It made the
+#: strip disagree with the program's own preview of the same frames,
+#: which is the complaint that got it removed; and it moved every
+#: upload off wire 66, the single point on this scale that was ever
+#: checked against a running GIF. Everything below is interpolation
+#: from that one point, so the default now sits on it.
+#:
+#: Speeding playback up is still a slider away. It is no longer what
+#: the program does to frames nobody asked it to re-time.
+DEFAULT_PLAYBACK_SPEED = NATIVE_SPEED
 
 BLOCK = 64
 
@@ -206,13 +302,63 @@ def speed_for_ms(milliseconds: float) -> int:
     The scale is inverted and short -- the whole usable range is about
     3 ms to 150 ms a frame -- so this clamps rather than pretending.
     """
-    wire = max(1, min(SPEED_BASE - 1, round(milliseconds / MS_PER_SPEED_UNIT)))
+    wire = max(1, min(SPEED_BASE - 1,
+                      round(milliseconds / ms_per_speed_unit())))
     return SPEED_BASE - wire
 
 
 def frame_ms(setting: int | None) -> float:
     """About how long a frame lasts at ``setting``."""
-    return speed_to_byte(setting) * MS_PER_SPEED_UNIT
+    return speed_to_byte(setting) * ms_per_speed_unit()
+
+
+def speed_for_source(delay_ms: float, stride: int = 1) -> int:
+    """The setting that replays a source at the pace it was drawn at.
+
+    ``stride`` is how many source frames each kept frame stands in for,
+    so a 100 ms GIF thinned to every third frame wants each survivor
+    held for 300 ms -- otherwise thinning a GIF also speeds it up.
+
+    Sources that carry no delay of their own fall back to the default,
+    which is that same native rate.
+
+    The result is clamped, and for a thinned GIF it will be: the whole
+    scale is one byte of delay units, so :func:`slowest_frame_ms` is as
+    long as a frame can be held. Callers that promise a source's own
+    pace should say so when :func:`source_rate_is_reachable` is false
+    rather than claim a rate the strip cannot keep.
+    """
+    if delay_ms <= 0:
+        return DEFAULT_PLAYBACK_SPEED
+    return speed_for_ms(delay_ms * max(1, stride))
+
+
+def source_ms(delay_ms: float, stride: int = 1) -> float:
+    """How long a kept frame lasted in the source it came from."""
+    return max(0.0, delay_ms) * max(1, stride)
+
+
+def slowest_frame_ms() -> float:
+    """The longest a frame can be held: the bottom of the scale.
+
+    A function and not a constant because calibration moves it, and a
+    constant read at import would be the old guess for the rest of the
+    process.
+    """
+    return frame_ms(1)
+
+
+def fastest_frame_ms() -> float:
+    """The shortest a frame can be held: the top of the scale."""
+    return frame_ms(100)
+
+
+def source_rate_is_reachable(delay_ms: float, stride: int = 1) -> bool:
+    """Whether the strip can hold a frame for that long at all."""
+    wanted = source_ms(delay_ms, stride)
+    return not wanted or fastest_frame_ms() <= wanted <= slowest_frame_ms()
+
+
 
 
 @dataclass

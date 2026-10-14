@@ -13,7 +13,16 @@ import json
 import random
 from pathlib import Path
 
-from .matrix import COLS, FRAME_BYTES, LEDS, MAX_FRAMES_ANIMATION, ROWS, Frame
+from .matrix import (
+    COLS,
+    DEFAULT_PLAYBACK_SPEED,
+    FRAME_BYTES,
+    LEDS,
+    MAX_FRAMES_ANIMATION,
+    ROWS,
+    Frame,
+    speed_for_source,
+)
 
 #: Where the shipped animations live, as the bytes the keyboard is sent.
 EFFECTS_DIR = Path(__file__).resolve().parent / "effects"
@@ -500,6 +509,26 @@ def load_bundled(key: str) -> list[Frame]:
         )
     return [Frame.decode(raw[at:at + FRAME_BYTES])
             for at in range(0, len(raw), FRAME_BYTES)]
+
+
+def source_speed(name: str) -> int:
+    """The speed setting that plays ``name`` at its own pace.
+
+    The shipped effects are GIFs scaled down to the strip, and the
+    index keeps both numbers that decide their pace: the delay the GIF
+    asked for, and the stride the conversion thinned it by. Playing
+    them at anything else is what made the strip and the program's
+    preview disagree.
+
+    Everything generated here is drawn frame by frame with no source to
+    be faithful to, so it takes the default -- which is the same native
+    rate the GIFs were authored at.
+    """
+    entry = bundled().get(name)
+    if entry is None:
+        return DEFAULT_PLAYBACK_SPEED
+    return speed_for_source(entry.get("delay_ms") or 0,
+                            entry.get("stride") or 1)
 
 
 def catalogue(with_overall: bool = False) -> dict[str, str]:

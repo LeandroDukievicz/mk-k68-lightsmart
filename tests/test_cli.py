@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mk_k68_lightsmart import cli, matrix
+from mk_k68_lightsmart import cli, matrix, patterns
 
 
 class DiagnosticPattern(unittest.TestCase):
@@ -87,16 +87,22 @@ class CommandLine(unittest.TestCase):
         code, _ = self.run_cli(["strip", "fill", "nope", "--dry-run"])
         self.assertEqual(code, 2)
 
-    def test_every_animating_path_defaults_to_the_boosted_rate(self):
+    def test_every_animating_path_defaults_to_the_sources_own_rate(self):
         # One of these per command that uploads frames, so a new one
-        # cannot quietly inherit the slow default.
-        for argv in (["pattern", "tetris", "--dry-run"],):
+        # cannot quietly invent a rate of its own.
+        for argv, name in ((["pattern", "tetris", "--dry-run"], "tetris"),):
             code, out = self.run_cli(argv)
             self.assertEqual(code, 0, argv)
-            self.assertIn(f"speed {matrix.DEFAULT_PLAYBACK_SPEED}", out)
-            self.assertIn(
-                f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms",
-                out)
+            want = patterns.source_speed(name)
+            self.assertIn(f"speed {want}", out)
+            self.assertIn(f"{matrix.frame_ms(want):.0f} ms", out)
+
+    def test_a_shipped_gif_keeps_the_rate_it_was_drawn_at(self):
+        if "matrix-plus" not in patterns.bundled():
+            self.skipTest("effects were not converted in this checkout")
+        code, out = self.run_cli(["pattern", "matrix-plus", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("100 ms a frame", out)
 
     def test_an_explicit_speed_still_wins(self):
         code, out = self.run_cli(
@@ -168,3 +174,39 @@ class ProbePattern(unittest.TestCase):
 
     def test_the_halves_are_split_by_a_dark_column(self):
         self.assertEqual(cli.probe_frame()[32, 0], 0x000000)
+
+
+class CalibrateSpeed(unittest.TestCase):
+    """The measurement that replaces the guessed frame rate."""
+
+    def run_cli(self, argv):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_the_loop_flashes_once(self):
+        frames = cli.blink_frames(10)
+        self.assertEqual(len(frames), 10)
+        self.assertTrue(any(frames[0].pixels))
+        for frame in frames[1:]:
+            self.assertFalse(any(frame.pixels))
+
+    def test_a_loop_needs_two_frames(self):
+        with self.assertRaises(ValueError):
+            cli.blink_frames(1)
+
+    def test_a_dry_run_sends_nothing_and_says_what_it_would_time(self):
+        code, out = self.run_cli(["calibrate-speed", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("nothing sent", out)
+        self.assertIn(f"wire value {matrix.speed_to_byte(matrix.NATIVE_SPEED)}",
+                      out)
+
+    def test_it_measures_at_the_speed_it_was_asked_for(self):
+        code, out = self.run_cli(
+            ["calibrate-speed", "--speed", "90", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn(f"wire value {matrix.speed_to_byte(90)}", out)

@@ -312,6 +312,19 @@ at `0x59353C`); brightness reaches the encoder as `percent * 255 / 100`,
 and the speed wire value is `0x66 - setting`, or `0x50` when the layer
 has none.
 
+What that byte *means* in milliseconds is not in the driver. It is a
+frame delay — the strip is slower at `0x80` than at `0x34` — but the
+unit was only ever guessed, by deciding that wire `0x42` looked like the
+100 ms the GIF it came from was authored at. That guess runs fast: at
+settings derived from it the strip steps frame by frame where the
+program's own preview of the same frames is fluid. So the unit is now a
+measurement the user takes once, with `calibrate-speed`, and is kept in
+`calibration.json` beside the schemes; the guess survives only as the
+fallback for a machine that never measured. Taking the reading at two
+different wire values is worth doing: two that agree say the byte is a
+plain multiple of a delay, two that disagree say there is a fixed cost
+per frame on top of it and one number is not enough to model it.
+
 The driver counts blocks twice and can disagree with itself. It
 announces `((frames * 975 + 2) >> 6) + 1` (`0x42A095`-`0x42A0B1`) but
 hands the bulk sender `frames * 975 + 4` (`0x42A2B5`), which applies

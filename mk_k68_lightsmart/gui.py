@@ -527,9 +527,8 @@ class MatrixPage(QWidget):
         speed.addWidget(caption("Speed"))
         self.speed = QSlider(Qt.Horizontal)
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
-        # Faster than the rate the shipped effects were drawn at, by
-        # whatever PLAYBACK_BOOST says -- the same default the rest of
-        # the program sends.
+        # The rate the shipped effects were drawn at. Loading one, or
+        # importing a GIF, replaces this with that source's own pace.
         self.speed.setValue(matrix.DEFAULT_PLAYBACK_SPEED)
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)
@@ -568,11 +567,17 @@ class MatrixPage(QWidget):
         lay.addWidget(ghost_button("Import from a vendor database…",
                                    self.import_vendor))
 
-        note = QLabel(
-            "Frames go to the keyboard as one animation, up to "
-            f"{matrix.MAX_FRAMES_ANIMATION}. Painting uses the colour "
-            "picked on the Home screen."
-        )
+        text = ("Frames go to the keyboard as one animation, up to "
+                f"{matrix.MAX_FRAMES_ANIMATION}. Painting uses the colour "
+                "picked on the Home screen.")
+        if not matrix.is_calibrated():
+            # The one honest thing to say about a rate nobody measured:
+            # how to measure it.
+            text += (" The strip's own frame rate has not been measured on "
+                     "this keyboard, so it may not match the preview — run "
+                     "`mk-k68-lightsmart calibrate-speed --save` once to fix "
+                     "that.")
+        note = QLabel(text)
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED.name()}; font-size: 11px;")
         lay.addWidget(note)
@@ -651,7 +656,10 @@ class MatrixPage(QWidget):
 
     # -- playback -------------------------------------------------------
     def _speed_changed(self, value: int) -> None:
-        self.speed_label.setText(f"{self._interval_ms(value)} ms/frame")
+        # A tilde while the rate is still the guess the program shipped
+        # with, so the label does not state a measurement nobody took.
+        mark = "" if matrix.is_calibrated() else "~"
+        self.speed_label.setText(f"{mark}{self._interval_ms(value)} ms/frame")
         if self._playing:
             self._timer.setInterval(self._interval_ms(value))
 
@@ -666,6 +674,32 @@ class MatrixPage(QWidget):
         is going to hit.
         """
         return max(16, round(matrix.frame_ms(speed)))
+
+    @staticmethod
+    def _rate_note(delay_ms: float, stride: int = 1) -> str:
+        """What to add to a status line about the rate that was chosen.
+
+        Silent when the source's own pace was honoured. A thinned GIF
+        asks for longer than the scale reaches, and saying so beats
+        letting the strip look faster than the file for no stated
+        reason.
+        """
+        if matrix.source_rate_is_reachable(delay_ms, stride):
+            return ""
+        wanted = matrix.source_ms(delay_ms, stride)
+        return (f" (the source wants {wanted:.0f} ms a frame; the strip "
+                f"stops at {matrix.slowest_frame_ms():.0f})")
+
+    def set_speed(self, setting: int) -> None:
+        """Hold a frame for as long as ``setting`` asks, within range.
+
+        Both the preview and the upload read the slider, so putting a
+        source's own rate here is what keeps the strip and the picture
+        on screen in step.
+        """
+        self.speed.setValue(
+            max(self.SPEED_MIN, min(self.SPEED_MAX, setting))
+        )
 
     def toggle_play(self) -> None:
         if self._playing:
@@ -727,10 +761,15 @@ class MatrixPage(QWidget):
         self.stop()
         self.frames = patterns.build(name)
         self.current = 0
+        self.set_speed(patterns.source_speed(name))
         self._refresh_timeline()
+        entry = patterns.bundled().get(name, {})
         self.status.emit(
-            f"loaded {name} — {len(self.frames)} frames, about "
+            f"loaded {name} — {len(self.frames)} frames at "
+            f"{self._interval_ms(self.speed.value())} ms, about "
             f"{self._seconds_for(len(self.frames))} s to upload"
+            + self._rate_note(entry.get("delay_ms") or 0,
+                              entry.get("stride") or 1)
         )
 
     def import_image(self) -> None:
@@ -778,14 +817,19 @@ class MatrixPage(QWidget):
         self.stop()
         self.frames = loaded.frames
         self.current = 0
+        # The file's own delay, widened by the stride, so a thinned GIF
+        # still plays over the same stretch of time it used to.
+        self.set_speed(matrix.speed_for_source(loaded.delay_ms, stride))
         self._refresh_timeline()
         kept = (f"every {stride} of {loaded.available}" if stride > 1
                 else f"all {loaded.available}")
         if loaded.truncated:
             kept += f" (first {len(loaded.frames)} kept; keyboard limit)"
         self.status.emit(
-            f"imported {len(self.frames)} frames ({kept}) — "
+            f"imported {len(self.frames)} frames ({kept}) at "
+            f"{self._interval_ms(self.speed.value())} ms — "
             f"about {self._seconds_for(len(self.frames))} s to upload"
+            + self._rate_note(loaded.delay_ms, stride)
         )
 
     @staticmethod

@@ -231,10 +231,20 @@ one is the picture you paint on, and the whole list goes to the keyboard
 as one animation — up to the firmware's 941.
 
 - **Add**, **Duplicate**, **Delete**, **Clear this frame**.
-- **Play** previews the animation in the window, at the frame rate the
-  speed slider will give the keyboard — the firmware's mapping is
-  calibrated, so the label says what the strip will do. Only the top of
-  the slider parts company with it, where the preview floors at 16 ms.
+- **Play** previews the animation in the window at the rate the slider
+  asks the keyboard for. Loading a shipped effect, or importing a GIF,
+  moves the slider to the delay that source was drawn at — a 100 ms GIF
+  plays at 100 ms, and one thinned to every third frame asks for 300,
+  which is past the end of the scale and said so rather than silently
+  run fast.
+- **The rate wants measuring once.** Everything the program says about
+  frame rate comes from one number, milliseconds per unit of the speed
+  byte, and it was originally eyeballed rather than measured — which is
+  why the strip could step frame by frame where the preview was fluid.
+  Run `mk-k68-lightsmart calibrate-speed --save` once: it flashes the
+  strip a known number of times, you tap Enter on the first and last
+  flash, and the measurement is kept. Until then the slider's label
+  carries a `~`.
 - **Upload animation** streams the whole thing, with the same progress
   bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
   seconds.
