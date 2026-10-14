@@ -1831,14 +1831,32 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # These three go before the QApplication exists, not after it.
+    #
+    # On Wayland the application id travels with the connection, and the
+    # connection is made inside the QApplication constructor. Setting
+    # the name afterwards is too late: the compositor answers "connection
+    # already associated with an application ID" and the window keeps an
+    # id matching no .desktop file. GNOME then cannot tie the window to
+    # the launcher that started it, so the startup notification never
+    # completes, the window opens unfocused behind whatever had focus,
+    # and the icon falls back to a generic one -- which from the menu
+    # looks exactly like clicking it did nothing.
+    #
+    # They are static on QGuiApplication precisely so they can be called
+    # this early.
+    QApplication.setApplicationName("MK-K68-LightSmart")
+    QApplication.setApplicationDisplayName("MK-K68-LightSmart")
+    QApplication.setDesktopFileName("mk-k68-lightsmart")
+
     app = QApplication(sys.argv if argv is None else argv)
-    app.setApplicationName("MK-K68-LightSmart")
-    app.setApplicationDisplayName("MK-K68-LightSmart")
-    # Wayland matches a window to its icon through the desktop file name,
-    # so without this the dock shows a generic icon.
-    app.setDesktopFileName("mk-k68-lightsmart")
     win = MainWindow()
     win.show()
+    # Ask for the front even so. A compositor may refuse -- that is its
+    # business, not a failure here -- but without asking, a window that
+    # opened behind something stays there.
+    win.raise_()
+    win.activateWindow()
     return app.exec()
 
 

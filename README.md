@@ -124,9 +124,16 @@ cp docs/images/icon-64.png \
 sed -e "s|^Exec=.*|Exec=$HOME/.local/bin/mk-k68-lightsmart-gui|" \
     -e 's|^Icon=.*|Icon=mk-k68-lightsmart|' \
     desktop/mk-k68-lightsmart.desktop \
-    > ~/.local/share/applications/mk-k68-lightsmart_gui.desktop
+    > ~/.local/share/applications/mk-k68-lightsmart.desktop
 update-desktop-database ~/.local/share/applications
 ```
+
+O nome do arquivo instalado importa: no Wayland a janela se identifica
+pelo id que `setDesktopFileName` registra -- `mk-k68-lightsmart` -- e o
+GNOME procura um `.desktop` com exatamente esse nome. Instalado como
+`mk-k68-lightsmart_gui.desktop`, a busca falha, a janela não é ligada ao
+item de menu que a abriu, e clicar no menu parece não fazer nada: a
+janela abre sem foco, atrás do que estava em uso, com o ícone genérico.
 
 **Não instale isto como Snap.** Houve um pacote Snap deste app, e
 tê-lo instalado junto com o checkout significava duas cópias com código
