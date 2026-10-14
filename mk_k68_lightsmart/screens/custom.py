@@ -1470,24 +1470,44 @@ class CustomPage(QWidget):
             f"after this app closes")
 
     def _send_steady(self, effect, targets: dict[int, QColor]) -> None:
-        """Put a frame that never changes on the keyboard, once."""
+        """Put a frame that never changes on the keyboard, once.
+
+        The whole painted layout goes, not only the keys just picked.
+        Writing one key moves the board off whatever it was showing --
+        a built-in effect included -- onto the per-key layer, and every
+        key not written there is dark. Sending only the selection
+        therefore reads as "Apply turned the lighting off", which is
+        what it was reported as.
+        """
         play = PLAYERS[effect.mode]
-        for index, colour in targets.items():
+        for index, colour in self.painted.items():
             self.apply_key.emit(index, play(index, 0.0, colour))
         blanked = len(self.stale)
         self._blank_stale()
-        said = f"{effect.name}: {len(targets)} keys…"
+        rest = len(self.painted) - len(targets)
+        said = f"{effect.name}: {len(targets)} keys"
+        if rest > 0:
+            said += f", and {rest} the layout already had"
         if blanked:
-            said = f"{effect.name}: {len(targets)} keys, blanking {blanked}…"
-        self.status.emit(said)
+            said += f", blanking {blanked}"
+        self.status.emit(said + "…")
 
     def _start(self, effect, targets: dict[int, QColor]) -> None:
-        """Run an effect on the host, over the keys it was applied to."""
+        """Run an effect on the host, over the keys it was applied to.
+
+        The keys outside the selection are written once first, in the
+        colours the layout holds for them. Without that they go dark:
+        the first per-key write moves the board off whatever it was
+        showing, and anything this screen never writes stays unlit.
+        """
         self._running = effect
         self._targets = targets
         self._phase = 0.0
         self._sent.clear()
         self._blank_stale()
+        for index, colour in self.painted.items():
+            if index not in targets:
+                self.apply_key.emit(index, colour)
         self._draw()
         self._frames.start(self.FRAME_MS)
         self._sender.start(self.SEND_INTERVAL)
