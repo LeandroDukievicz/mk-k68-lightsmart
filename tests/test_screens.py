@@ -24,13 +24,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import QMetaMethod, Signal
     from PySide6.QtGui import QColor
     from PySide6.QtWidgets import QApplication
 except ImportError:                                   # pragma: no cover
     QApplication = None
 
 if QApplication is not None:
-    from mk_k68_lightsmart import screens
+    from mk_k68_lightsmart import gui, screens
 
 app = None
 
@@ -107,6 +108,75 @@ class TheWiringContract(unittest.TestCase):
         page = screens.ProfilesPage()
         self.assertTrue(connects(page, "replay_requested"))
         self.assertTrue(connects(page, "scheme_changed"))
+
+
+def own_signals(page) -> dict[str, bool]:
+    """Each signal this project declares on ``page``, and whether it is
+    connected.
+
+    Only the signals declared in our own classes: a QWidget arrives
+    carrying a dozen of Qt's, and nothing here is wired to those.
+    """
+    names = {
+        name
+        for cls in type(page).__mro__
+        if cls.__module__.startswith("mk_k68_lightsmart")
+        for name, value in vars(cls).items()
+        if isinstance(value, Signal)
+    }
+    meta = page.metaObject()
+    state = {}
+    for index in range(meta.methodCount()):
+        method = meta.method(index)
+        name = bytes(method.name()).decode()
+        if (method.methodType() == QMetaMethod.MethodType.Signal
+                and name in names):
+            state[name] = page.isSignalConnected(method)
+    return state
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class TheWindowReallyConnectsThem(unittest.TestCase):
+    """That ``MainWindow`` *did* connect each screen, not that it could.
+
+    ``connects`` above asks whether a signal accepts a connection, which
+    every signal does, so it passes just as happily when the window
+    never mentions the screen at all. That is the hole Music's
+    ``apply_effect`` fell through: pressing "Apply to keyboard" set the
+    status line, lit the screen's own preview and then dropped the
+    command, because Qt discards an emit with no receiver in silence.
+    Nothing looked broken anywhere except on the keyboard.
+    """
+
+    PAGES = ("keys_page", "macro_page", "profiles_page",
+             "custom_page", "music_page")
+
+    def window(self):
+        window = gui.MainWindow()
+        # The window owns a thread that opens the device. Stopping it is
+        # what lets the worker close the descriptor on the thread that
+        # opened it, and keeps a torn-down window from emitting into a
+        # deleted receiver.
+        self.addCleanup(window.device.stop)
+        return window
+
+    def test_no_screen_signal_is_left_dangling(self):
+        window = self.window()
+        for name in self.PAGES:
+            for signal, connected in own_signals(
+                    getattr(window, name)).items():
+                with self.subTest(page=name, signal=signal):
+                    self.assertTrue(
+                        connected,
+                        f"{name}.{signal} is emitted but nothing in "
+                        f"MainWindow listens, so it does nothing at all")
+
+    def test_music_hands_its_resting_board_to_the_firmware(self):
+        # The specific regression: resting lit goes out as one effect
+        # command, not as 69 per-key writes, so Music needs the effect
+        # handler and not only the per-key one.
+        window = self.window()
+        self.assertTrue(own_signals(window.music_page)["apply_effect"])
 
 
 if __name__ == "__main__":

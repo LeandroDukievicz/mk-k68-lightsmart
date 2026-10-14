@@ -1229,6 +1229,12 @@ class MainWindow(QMainWindow):
         # The same handler as the custom screen: both are painting
         # keys, and the worker coalesces them per key either way.
         self.music_page.apply_key.connect(self.on_custom_key)
+        # Resting lit goes out as a whole-board effect, not as 69 per-key
+        # writes, so it needs the effect handler as well. Without this
+        # line the screen still reported success and still lit its own
+        # preview -- an emit with nothing connected is dropped in
+        # silence -- while the keyboard never heard the command.
+        self.music_page.apply_effect.connect(self.apply_custom_effect)
         self.music_page.scheme_changed.connect(self.on_scheme_changed)
 
         # The rail's sections, in its order. Every one has a screen now.
