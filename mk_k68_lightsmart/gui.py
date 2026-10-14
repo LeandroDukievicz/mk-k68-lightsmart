@@ -299,7 +299,8 @@ def caption(text: str) -> QLabel:
     return lb
 
 
-def _fit_label(button: QPushButton, side_padding: int) -> None:
+def _fit_label(button: QPushButton, side_padding: int,
+               bold: bool = False) -> None:
     """Make a button wide enough for the words on it.
 
     Qt works a button's preferred width out from its text and its
@@ -311,9 +312,16 @@ def _fit_label(button: QPushButton, side_padding: int) -> None:
 
     So measure it here, in the same font the sheet sets, and ask for
     the padding as well.
+
+    ``bold`` has to match the sheet too. The accented button paints
+    ``font-weight:bold`` and bold is the wider face, so measuring at
+    the normal weight under-asked by a few pixels -- enough for the
+    slack below to swallow most of it and still clip the last glyph off
+    the longest labels, which is what "Apply to keyboar" was.
     """
     font = button.font()
     font.setPixelSize(BUTTON_FONT_PX)
+    font.setBold(bold)
     button.setFont(font)
     width = QFontMetricsF(font).horizontalAdvance(button.text())
     # The border and a little slack, because a fractional advance
@@ -336,7 +344,7 @@ def primary_button(text: str, on_click) -> QPushButton:
         "QPushButton:hover { background:#3dbdff; }"
         "QPushButton:disabled { background:#123a5c; color:#5b7894; }"
     )
-    _fit_label(b, 16)
+    _fit_label(b, 16, bold=True)
     b.clicked.connect(on_click)
     return b
 

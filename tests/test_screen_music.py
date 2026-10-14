@@ -36,7 +36,7 @@ from mk_k68_lightsmart import layout as kb_layout
 from mk_k68_lightsmart import store
 
 if QApplication is not None:
-    from mk_k68_lightsmart import screens
+    from mk_k68_lightsmart import protocol, screens
     from mk_k68_lightsmart.screens import music
 
 app = None
@@ -845,6 +845,58 @@ class SettingsFollowTheScheme(ScreenFixture):
                          music.MusicSettings().colour.name())
         self.page.schemes.setCurrentRow(0)
         self.assertEqual(self.page._colour.name(), "#123456")
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class ApplyHasToOutlastTheNextTick(unittest.TestCase):
+    """Apply lights the whole board, so the bars have to give way.
+
+    Resting lit is one effect command; the bars are per-key writes, and
+    a per-key write drops the board off the effect layer. So while the
+    listener ran, Apply used to light the board and the next tick with
+    sound in it took it straight back about 1.2 seconds later -- a
+    blink, and a button that read as broken. Seen on the wire as one
+    mode-0x01 envelope followed by per-key 0x80 envelopes 1.576s later.
+    """
+
+    def setUp(self):
+        self.page = screens.MusicPage()
+        self.effects: list[tuple] = []
+        self.keys: list[int] = []
+        self.page.apply_effect.connect(lambda *a: self.effects.append(a))
+        self.page.apply_key.connect(lambda i, c: self.keys.append(i))
+
+    def tearDown(self):
+        self.page._capture = None
+        self.page._stop()
+
+    def listening(self) -> None:
+        """The screen as it stands while the listener runs."""
+        self.page._capture = FakeCapture([0.9] * 64)
+        self.page._timer.start(self.page.INTERVAL)
+        self.page._sender.start(music.SEND_INTERVAL)
+
+    def test_apply_lights_the_board_with_one_effect(self):
+        self.page._apply()
+        self.assertEqual(len(self.effects), 1)
+        self.assertEqual(self.effects[0][0], protocol.effect_mode("Static"))
+
+    def test_apply_stops_the_listener_that_would_paint_over_it(self):
+        self.listening()
+        self.page._apply()
+        self.assertFalse(self.page._timer.isActive())
+        self.assertFalse(self.page._sender.isActive())
+        self.assertIsNone(self.page._capture)
+
+    def test_no_per_key_write_survives_an_apply(self):
+        self.listening()
+        self.page._apply()
+        # What used to undo it: a tick that finds sound clears the
+        # resting flag, and the sender then paints the bars per key.
+        self.page._tick()
+        self.page._send()
+        self.assertEqual(self.keys, [])
+        self.assertTrue(self.page._resting)
 
 
 if __name__ == "__main__":

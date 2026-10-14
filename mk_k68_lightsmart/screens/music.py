@@ -821,12 +821,23 @@ class MusicPage(QWidget):
         self.route.setWordWrap(True)
         self._describe_route()
 
-        actions = QHBoxLayout()
+        # Two rows, because three of these do not fit the card: their
+        # minimum widths come to 310px against a 280px card, and a
+        # QHBoxLayout under that much pressure clips the labels rather
+        # than wrapping them. Apply goes on its own line -- it is the
+        # longest label and the one that reads worst when cut.
+        actions = QVBoxLayout()
+        listening = QHBoxLayout()
         self.start = primary_button("Start listening", self._start)
-        actions.addWidget(self.start)
-        actions.addWidget(ghost_button("Stop", self._stop))
-        actions.addWidget(primary_button("Apply to keyboard", self._apply))
-        actions.addStretch()
+        listening.addWidget(self.start)
+        listening.addWidget(ghost_button("Stop", self._stop))
+        listening.addStretch()
+        actions.addLayout(listening)
+
+        applying = QHBoxLayout()
+        applying.addWidget(primary_button("Apply to keyboard", self._apply))
+        applying.addStretch()
+        actions.addLayout(applying)
 
         kept = caption(
             "A scheme's name and the rest of its contents are kept in "
@@ -1145,21 +1156,37 @@ class MusicPage(QWidget):
 
     # -- running --------------------------------------------------------
     def _apply(self) -> None:
-        """Put this screen's lighting on the keyboard now.
+        """Put this screen's lighting on the keyboard, and let it stay.
 
-        Without sound there is nothing to react to, so this lights the
-        whole board and leaves it to the firmware to hold -- which is
-        also what happens by itself once the music stops. With sound it
-        is the bars, which the listener is already sending.
+        Lights the whole board in one effect command and leaves the
+        firmware holding it.
+
+        This stops the listener first, and has to. Resting lit is a
+        single effect command, and the bars are per-key writes -- a
+        per-key write drops the board off the effect layer, darkening
+        every key the bars are not painting. So while the listener ran,
+        pressing this lit the board and the next tick with sound in it
+        took the board straight back, about 1.2 seconds later: a blink,
+        and a button that looked broken for the second time. Measured
+        on the wire -- one mode-0x01 envelope, then per-key 0x80
+        envelopes 1.576s behind it.
+
+        Handing the board back to the bars is what Stop-then-Start is
+        for, and what the screen does by itself when the music stops.
         """
-        # Always light the board. Refusing while the bars were running
-        # made the button look broken: it was pressed, the status line
-        # said something, and the keyboard did not change -- which is
-        # indistinguishable from nothing happening at all.
+        listening = self._timer.isActive()
+        if listening:
+            self._stop()
         self._resting = True
         self._quiet_since = None
         self._sent.clear()
         self.rest_now()
+        # Last word, because _stop and rest_now each set one of their
+        # own and the useful thing to say is why the bars went away.
+        if listening:
+            self.status.emit(
+                "every key lit and held by the keyboard — stopped "
+                "listening, since the bars would paint over this")
 
     def _start(self) -> None:
         if self._timer.isActive():
