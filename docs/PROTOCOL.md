@@ -471,10 +471,73 @@ and the `remap` command asks before it does.
 04 02                                apply
 ```
 
-`blocks = len/64 + (1 if len % 64 == 0 else 2)` (`0x433230`). Events are
-encoded one at a time; a key event emits the marker `0x50` followed by
-two bytes from the event record (`0x432F8F`). The full event encoding is
-not decoded yet.
+`blocks = len/64 + (1 if len % 64 == 0 else 2)` (`0x433230`).
+
+### The event record on the wire
+
+**verified** from `fcn.00432938` -- the encoder loop at `0x432F60`.
+
+Events are fixed width: **4 bytes each**, written through four pointers
+that all advance by 4 per event (`0x432FD5`-`0x432FE6`). Reading them
+back from where they are set up (`0x432F37`-`0x432F51`):
+
+| byte | written by | holds |
+|---|---|---|
+| 0 | `[ebp-0xe80]` | first data byte |
+| 1 | `[ebp-0xe7c]` | second data byte |
+| 2 | `ebx` | the converted key, for the types that convert |
+| 3 | `edi` | **the marker**, which is what names the event |
+
+The encoder stops at `0xE00` bytes (`0x432FB5`), so a macro is at most
+**896 events**.
+
+The marker is chosen by the event's own type, at `[record+8]`:
+
+| type | marker | what goes with it |
+|---|---|---|
+| 1 | `0x50` | bytes 0 and 1 from `[record+0x10]` and `[record+0x11]`, raw |
+| 2 | `0xB0` | byte 2 = `vk_to_hid([record+0x10])` |
+| 3 | `0x30` | byte 2 = `vk_to_hid([record+0x10])` |
+| 4 | `0x90` | byte 2 = 1 when `[record+0x10] == 1` |
+| 5 | — | byte 2 = 1 or 4, by `[record+0x10]` |
+
+A record of `0A .. .. 50` is emitted between events in one branch
+(`0x432FC5`), guarded by a flag the type-1 branch sets (`mov cl, 1` at
+`0x432FA0`) -- so it is written when the previous event was *not* a key
+event. A separator or a release; which, is not established.
+
+### `vk_to_hid` -- `fcn.00458290`
+
+**verified** against the HID usage table.
+
+A Windows virtual-key code in, a HID usage out:
+
+| VK | maps to | HID usage |
+|---|---|---|
+| `0x41`-`0x5A` (`A`-`Z`) | `vk - 0x3D` | `0x04`-`0x1D` |
+| `0x31`-`0x39` (`1`-`9`) | `vk - 0x13` | `0x1E`-`0x26` |
+| `0x30` (`0`) | `0x27` | `0x27` |
+| `0x0D` (Return) | `0x28` | `0x28` |
+
+The table continues past Return in the same shape.
+
+### What is still open
+
+The two bytes a type-1 event carries, `[record+0x10]` and
+`[record+0x11]`, are written to the wire raw -- unlike types 2 and 3,
+which convert a virtual-key through `vk_to_hid` first. So a type-1
+record already holds whatever the firmware wants, and finding out what
+that is means finding where such a record is built. It is not built in
+either of the two functions that call `MapVirtualKeyExW`
+(`fcn.00412E80`, `fcn.00455570`): both of those only reach
+`GetKeyNameTextW`, which is the key's *display* name for the editor's
+list.
+
+Until those two bytes are known, **this implementation does not send
+macros**. The command, the framing, the block count, the event width
+and the marker table are all settled; guessing the two payload bytes
+would write a macro into a keyboard that keeps it across a power cycle,
+and the way back out is itself a macro write.
 
 ## 9. What is still open
 
