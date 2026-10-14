@@ -718,3 +718,28 @@ does, and the per-key path is the only lighting the host can place.
 On this unit, running the vendor's own V1.1 firmware, even that path
 displays nothing: writing a key and reading the frame back shows the
 record unchanged. Effects work; placed colours do not.
+
+### Why the 15 ms is not negotiable
+
+The strip's bulk sender in the driver (`fcn.00456090`) sleeps **2 ms**
+a block, and the command sender (`fcn.00455E50`) sleeps 15. Reading
+that as "pixels can go seven times faster" is wrong, and costs a
+wedged keyboard to find out.
+
+`Sleep(2)` on Windows does not sleep 2 ms. Without `timeBeginPeriod`
+it returns on the next timer tick, about 15.6 ms away by default — so
+that loop paces at roughly the same 15 ms as everything else. The one
+path that really is fast, `fcn.00456400`, raises the resolution first
+with `timeBeginPeriod(1)` and only then sleeps 3; it is also a
+single-report request/response, not bulk.
+
+Measured here, against the hardware: a one-frame strip upload is 16
+blocks and takes 367 ms at 15 ms pacing, which is 2.7 frames a second.
+Dropping the payload to 2 ms made the firmware lose blocks — the apply
+came back `0x00`, still counting — twice, with the envelope left on
+the slow pacing both times. `FLUSH_PACING` gets away with 2 ms because
+blank blocks are only counted, not drawn.
+
+So 2.7 fps is the strip's live ceiling, and a one-key write is nine
+reports. Neither is a budget a sound visualiser fits in; that is the
+hardware, not the port.
