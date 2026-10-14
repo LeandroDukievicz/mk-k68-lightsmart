@@ -671,3 +671,50 @@ animation's sender; that is `fcn.004561C0` (§6), which applies
 
 What is left is quickest to settle by sending a packet and watching the
 keyboard, which is why the CLI exposes a raw send path.
+
+## Reading the keys back — `04 F5`
+
+`04 F5` with byte 8 = 9 opens a sequential read of the keys' frame.
+Each report that follows carries sixteen four-byte records,
+`(light index, R, G, B)`, the index first — the same record shape the
+driver's `fcn.00430B40` reads before handing the result to
+`GetKeyItems_KeyboardCtrl`.
+
+What comes back is the **rendered** frame, not a stored layer. Held on
+a static effect, two reads a moment apart are byte-identical; with an
+animation running they differ. The colours arrive already scaled by the
+effect's brightness, so green at brightness 100 reads `00 84 00` rather
+than `00 FF 00`.
+
+That makes this the only way to see what the keyboard is doing without
+somebody looking at it, which is worth more than it sounds: every other
+check on this protocol ends in "did it light up?", and a wrong answer
+to that question sends an investigation days in the wrong direction.
+
+The read must be finished and closed. Leaving it open makes the
+keyboard answer `0xFF` to everything afterwards — including the next
+process — and `unstick` alone does not clear that, because it tests for
+`0x00`. Apply and end (`04 02`, `04 F0`) do.
+
+### What `04 23` is not
+
+The driver's `fcn.00430710` builds a 576-byte block of exactly these
+records and sends it under `04 23` with byte 8 = 9, inside
+begin/apply/end, the same shape as the keymap block — right down to the
+magic at 574 and the `(len >> 6) - 1` that makes 640 bytes become nine
+reports.
+
+It is tempting to read that as "set the whole board at once", and it is
+not. Replayed against a held static frame, with the frame read back
+before and after, nothing changed: no record took the colour sent, and
+the two reads stayed identical. Whatever that block addresses, it is not
+the frame being displayed.
+
+The vendor's manual agrees, and says so twice — §5 and §6 of the
+driver manual both end with 单次应用只能设置一个按键: *a single apply
+can only set one key*. A whole-board write is not a thing this firmware
+does, and the per-key path is the only lighting the host can place.
+
+On this unit, running the vendor's own V1.1 firmware, even that path
+displays nothing: writing a key and reading the frame back shows the
+record unchanged. Effects work; placed colours do not.

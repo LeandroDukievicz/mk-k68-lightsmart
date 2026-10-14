@@ -630,3 +630,128 @@ class FreeingAStuckKeyboard(unittest.TestCase):
         t = StuckTransport(4, pacing=transport.PACING)
         protocol.Keyboard(t).unstick()
         self.assertEqual(t.pacing, transport.PACING)
+
+
+class FrameTransport:
+    """A keyboard that answers a frame read with records.
+
+    Sixteen four-byte records per report, the index first, which is the
+    shape ``04 F5`` actually returned off the hardware.
+    """
+
+    pacing = 0.0
+
+    def __init__(self, colours: dict[int, tuple[int, int, int]]):
+        self.colours = colours
+        self.sent: list[bytes] = []
+        self._served = 0
+
+    def set_feature(self, payload: bytes) -> None:
+        self.sent.append(bytes(payload))
+        if payload[:2] == bytes((protocol.CMD_PREFIX,
+                                 protocol.SUB_READ_FRAME)):
+            self._served = 0
+
+    def get_feature(self) -> bytes:
+        per = transport.REPORT_SIZE // 4
+        first = self._served * per
+        self._served += 1
+        reply = bytearray(transport.REPORT_SIZE)
+        reply[transport.ACK_OFFSET] = transport.ACK_OK
+        for slot in range(per):
+            index = first + slot
+            at = slot * 4
+            reply[at] = index & 0xFF
+            red, green, blue = self.colours.get(index, (0, 0, 0))
+            reply[at + 1], reply[at + 2], reply[at + 3] = red, green, blue
+        return bytes(reply)
+
+    def close(self) -> None:
+        pass
+
+
+class ReadingTheFrame(unittest.TestCase):
+    """``04 F5``: what the keys are showing, read back.
+
+    This is the only way to check the keyboard without looking at it,
+    and it is what showed that the per-key write path displays nothing
+    on this firmware -- a held static effect read back identically
+    twice, and a per-key write did not change what came back.
+    """
+
+    def setUp(self):
+        self.t = FrameTransport({1: (0, 0x84, 0), 20: (0xFF, 0, 0)})
+        self.kb = protocol.Keyboard(self.t)
+
+    def test_the_request_is_the_drivers(self):
+        self.kb.read_frame()
+        self.assertEqual(hexs(self.t.sent[0], 2), "04 F5")
+        self.assertEqual(self.t.sent[0][8], 0x09)
+
+    def test_records_come_back_keyed_by_light_index(self):
+        frame = self.kb.read_frame()
+        self.assertEqual(frame[1], (0, 0x84, 0))
+        self.assertEqual(frame[20], (0xFF, 0, 0))
+        self.assertEqual(frame[2], (0, 0, 0))
+
+    def test_the_read_is_closed_even_though_nothing_failed(self):
+        # Leaving it open makes the keyboard answer 0xFF to everything
+        # afterwards, which unstick does not clear.
+        self.kb.read_frame()
+        self.assertEqual(self.t.sent[-2][:2],
+                         bytes((protocol.CMD_PREFIX, protocol.SUB_APPLY)))
+        self.assertEqual(self.t.sent[-1][:2],
+                         bytes((protocol.CMD_PREFIX, protocol.SUB_END)))
+
+    def test_it_closes_even_when_the_read_blows_up(self):
+        def boom():
+            raise transport.TransportError("gone")
+        self.t.get_feature = boom
+        with self.assertRaises(transport.TransportError):
+            self.kb.read_frame()
+        self.assertEqual(self.t.sent[-1][:2],
+                         bytes((protocol.CMD_PREFIX, protocol.SUB_END)))
+
+
+class BothWedgedStates(unittest.TestCase):
+    """0x00 and 0xFF are different faults with different cures.
+
+    Feeding blocks to a keyboard that merely has a transaction open
+    does nothing; closing it is what helps. Checking only ``stuck()``
+    told a keyboard that was refusing every command that it was
+    answering normally.
+    """
+
+    class Answering:
+        pacing = 0.0
+
+        def __init__(self, ack):
+            self.ack = ack
+            self.sent = []
+
+        def set_feature(self, payload):
+            self.sent.append(bytes(payload))
+
+        def get_feature(self):
+            reply = bytearray(transport.REPORT_SIZE)
+            reply[transport.ACK_OFFSET] = self.ack
+            return bytes(reply)
+
+        def close(self):
+            pass
+
+    def test_an_open_transaction_is_wedged_but_not_stuck(self):
+        kb = protocol.Keyboard(self.Answering(transport.ACK_RETRY))
+        self.assertTrue(kb.wedged())
+        self.assertTrue(kb.busy())
+        self.assertFalse(kb.stuck())
+
+    def test_an_unfinished_upload_is_wedged_and_stuck(self):
+        kb = protocol.Keyboard(self.Answering(transport.ACK_STUCK))
+        self.assertTrue(kb.wedged())
+        self.assertTrue(kb.stuck())
+        self.assertFalse(kb.busy())
+
+    def test_a_healthy_keyboard_is_neither(self):
+        kb = protocol.Keyboard(self.Answering(transport.ACK_OK))
+        self.assertFalse(kb.wedged())

@@ -63,14 +63,19 @@ SUB_UNKNOWN_17 = 0x17
 SUB_BEGIN = 0x18         #: open a configuration transaction
 SUB_UNKNOWN_19 = 0x19
 SUB_UNKNOWN_20 = 0x20
-SUB_UNKNOWN_23 = 0x23
+SUB_UNKNOWN_23 = 0x23    #: the driver sends this with byte 8 = 0x09 and a
+                         #: 576-byte block shaped like the keymap's, from
+                         #: fcn.00430710. Replaying it changes nothing the
+                         #: keys show -- checked against a held frame, so
+                         #: whatever it addresses is not the one being
+                         #: displayed. See docs/PROTOCOL.md.
 SUB_FNLAYER = 0x27       #: Fn-layer remap block (byte 8 = 0x09)
 SUB_MACRO_A = 0x31
 SUB_MACRO_B = 0x33
 SUB_UNKNOWN_35 = 0x35
-SUB_UNKNOWN_61 = 0x61
+SUB_BATTERY = 0x61       #: ask for the battery level; the reply's byte 3 is 0-100
 SUB_END = 0xF0           #: close the transaction
-SUB_UNKNOWN_F5 = 0xF5
+SUB_READ_FRAME = 0xF5    #: read the keys' live frame back (byte 8 = 0x09)
 
 #: Byte 0 of a data frame when the frame sets one key's colour outright
 #: instead of selecting a built-in animation.
@@ -564,6 +569,59 @@ class Keyboard:
         finally:
             self._end_quietly()
         return blocks
+
+    #: Reports a frame read returns, and the bytes per key in one.
+    FRAME_REPORTS = 10
+    FRAME_RECORD = 4
+
+    def read_frame(self) -> dict[int, tuple[int, int, int]]:
+        """What the keys are showing right now, read off the keyboard.
+
+        ``04 F5`` with byte 8 = 9 opens a sequential read of the keys'
+        frame; each report that follows carries sixteen records of
+        ``(light index, r, g, b)``, the index first, exactly as the
+        block the driver writes is laid out (``fcn.00430B40`` reads it
+        this way before calling ``GetKeyItems``).
+
+        This is the *rendered* frame, not a stored layer: while an
+        animation runs, two reads a moment apart differ, and holding a
+        static effect makes them identical. That makes it the one way
+        to check what the keyboard is doing without looking at it --
+        which is how the per-key write path was found to display
+        nothing on this firmware.
+
+        The colours come back already scaled by the effect's
+        brightness, so green at brightness 100 reads as ``00 84 00``
+        rather than ``00 FF 00``.
+
+        The read has to be finished and closed. Leaving it open makes
+        the keyboard answer ``0xFF`` to everything afterwards, which
+        :meth:`unstick` does not clear -- so the close is in a
+        ``finally``.
+        """
+        self.t.set_feature(control(SUB_READ_FRAME, b8=0x09))
+        try:
+            blob = b"".join(
+                self.t.get_feature() for _ in range(self.FRAME_REPORTS))
+        finally:
+            # Apply then end, which is what clears the 0xFF the open
+            # read leaves behind.
+            for sub in (SUB_APPLY, SUB_END):
+                try:
+                    self._step(control(sub))
+                except TransportError:
+                    pass
+
+        frame = {}
+        for at in range(0, len(blob) - self.FRAME_RECORD + 1,
+                        self.FRAME_RECORD):
+            index, red, green, blue = blob[at:at + self.FRAME_RECORD]
+            if index * self.FRAME_RECORD != at:
+                # Past the records, or a report that is an echo rather
+                # than data: the index and its position stop agreeing.
+                break
+            frame[index] = (red, green, blue)
+        return frame
 
     def set_key_colour(self, light_index: int, rgb: tuple[int, int, int]) -> None:
         """Light one key a fixed colour.

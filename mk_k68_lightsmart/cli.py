@@ -64,6 +64,32 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_frame(args: argparse.Namespace) -> int:
+    """Print what the keys are showing, read off the keyboard.
+
+    The one check that does not need somebody looking at the board. A
+    held static effect reads back the same twice; an animation does
+    not. Colours come back already scaled by the effect's brightness.
+    """
+    names = {k.light_index: k.ident for k in layout.KEYS}
+    with protocol.Keyboard() as kb:
+        frame = kb.read_frame()
+        if args.twice:
+            import time
+            time.sleep(args.wait)
+            again = kb.read_frame()
+            same = frame == again
+            print(f"two reads {args.wait:g}s apart: "
+                  f"{'identical — a held frame' if same else 'different — animating'}")
+    lit = {i: c for i, c in frame.items() if c != (0, 0, 0)}
+    print(f"keys lit: {len(lit)} of {len(names)}")
+    for index in sorted(lit):
+        red, green, blue = lit[index]
+        label = names.get(index, "?")
+        print(f"  {index:4d}  {label:<11s} #{red:02X}{green:02X}{blue:02X}")
+    return 0
+
+
 def cmd_unstick(args: argparse.Namespace) -> int:
     """Free a keyboard still waiting for an upload that stopped early.
 
@@ -72,13 +98,28 @@ def cmd_unstick(args: argparse.Namespace) -> int:
     or where the CLI is what is being used in the first place.
     """
     with protocol.Keyboard() as kb:
-        if not kb.stuck():
+        if not kb.wedged():
             print("the keyboard is answering normally — nothing to free")
+            return 0
+        # Two different states, and only one of them is an upload. A
+        # transaction nobody closed answers 0xFF, and feeding it blocks
+        # does nothing: this used to check stuck() alone and tell a
+        # keyboard that was refusing every command that it was
+        # answering normally.
+        if kb.busy():
+            print("a transaction was left open on the keyboard; "
+                  "closing it…")
+            kb.close_dangling()
+            if kb.wedged():
+                print("still refusing commands — unplug it and plug it "
+                      "back in")
+                return 1
+            print("closed")
             return 0
         print("the keyboard is waiting for the rest of an upload; "
               "making up the outstanding blocks…")
         fed = kb.unstick(progress=lambda n: print(f"  {n} blocks…"))
-        if kb.stuck():
+        if kb.wedged():
             print(f"still waiting after {fed} blocks — unplug it and "
                   f"plug it back in")
             return 1
@@ -636,9 +677,19 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("info", help="show the detected device (read-only)").set_defaults(func=cmd_info)
     sub.add_parser("keys", help="list keys and their LED indices").set_defaults(func=cmd_keys)
+    frame = sub.add_parser(
+        "frame",
+        help="show what the keys are displaying now (read-only)",
+    )
+    frame.add_argument("--twice", action="store_true",
+                       help="read twice, to tell a held frame from an animation")
+    frame.add_argument("--wait", type=float, default=0.6,
+                       help="seconds between the two reads (default 0.6)")
+    frame.set_defaults(func=cmd_frame)
     sub.add_parser(
         "unstick",
-        help="free a keyboard left waiting for an interrupted upload",
+        help="free a keyboard left waiting for an interrupted upload, or "
+             "left with a transaction open",
     ).set_defaults(func=cmd_unstick)
 
     r = sub.add_parser("raw", help="send a raw payload, as hex bytes")
