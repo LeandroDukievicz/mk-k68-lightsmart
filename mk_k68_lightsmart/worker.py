@@ -25,6 +25,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from . import protocol
 from .matrix import Animation
 from .transport import (
+    ACK_RETRY,
     ACK_STUCK,
     DeviceGone,
     DeviceNotFound,
@@ -92,6 +93,13 @@ class DeviceWorker(QObject):
     @Slot()
     def close(self) -> None:
         if self.kb is not None:
+            # Closing the handle does not close a transaction: that
+            # lives in the keyboard and survives this process. Leaving
+            # one open is what makes the next run fail on every command.
+            try:
+                self.kb.close_dangling()
+            except Exception:
+                pass
             self.kb.close()
             self.kb = None
 
@@ -147,19 +155,31 @@ class DeviceWorker(QObject):
             return False
         if not isinstance(exc, TransportError):
             return False
-        if f"{ACK_STUCK:#04x}" not in str(exc):
+        said = str(exc)
+        if (f"{ACK_STUCK:#04x}" not in said
+                and f"{ACK_RETRY:#04x}" not in said):
             return False
         self._recovering = True
         try:
-            if not self.kb.stuck():
-                return False
-            self.status.emit(
-                "the keyboard is still waiting for an upload that stopped "
-                "early — finishing it off…", False)
-            fed = self.kb.unstick()
-            self.status.emit(
-                f"keyboard freed after {fed} leftover block(s)", True)
-            return True
+            if self.kb.stuck():
+                self.status.emit(
+                    "the keyboard is still waiting for an upload that "
+                    "stopped early — finishing it off…", False)
+                fed = self.kb.unstick()
+                self.status.emit(
+                    f"keyboard freed after {fed} leftover block(s)", True)
+                return True
+            if self.kb.busy():
+                # A transaction nobody closed, which outlives the process
+                # that opened it: close the app mid-send and the next run
+                # cannot write a single key until this goes out.
+                self.status.emit(
+                    "a transaction was left open on the keyboard — "
+                    "closing it…", False)
+                self.kb.close_dangling()
+                self.status.emit("keyboard freed", True)
+                return True
+            return False
         except (TransportError, ValueError, OSError):
             return False
         finally:

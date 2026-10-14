@@ -334,6 +334,34 @@ class Keyboard:
         """
         return self.t.get_feature()[ACK_OFFSET] == ACK_STUCK
 
+    def busy(self) -> bool:
+        """Is a transaction still open on the keyboard?
+
+        ``0xFF`` is documented as busy, and a transaction nobody closed
+        is what keeps it that way: measured in section 6, the replies
+        turned ``0xFF`` once an abandoned upload had been fed its
+        blocks, and stayed there until apply and end went out.
+
+        It outlives the process that opened it. An app killed between
+        ``04 18`` and ``04 F0`` leaves the keyboard answering ``0xFF``
+        to everything, including the next run of the app, which then
+        cannot send a single key.
+        """
+        return self.t.get_feature()[ACK_OFFSET] == ACK_RETRY
+
+    def wedged(self) -> bool:
+        """Either of the two states a keyboard gets left in."""
+        reply = self.t.get_feature()[ACK_OFFSET]
+        return reply in (ACK_STUCK, ACK_RETRY)
+
+    def close_dangling(self) -> None:
+        """Close a transaction nobody closed, quietly."""
+        try:
+            self._step(control(SUB_APPLY))
+        except TransportError:
+            pass
+        self._end_quietly()
+
     def unstick(self, progress=None) -> int:
         """Free a keyboard left waiting for the rest of an upload.
 

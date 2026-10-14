@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import layout as kb_layout
+from .. import protocol
 from .. import store as scheme_store
 from ..gui import ACCENT, KeyboardView, caption, ghost_button, primary_button
 from .common import _card, _combo, _heading, _list, _note
@@ -659,6 +661,10 @@ class MusicPage(QWidget):
 
     apply_key = Signal(int, object)          # light_index, QColor
     status = Signal(str)
+    #: mode, r, g, b, brightness, speed -- the built-in effect command.
+    #: Lighting all sixty-nine keys over the per-key path takes ten
+    #: seconds; this is one transaction and the firmware holds it.
+    apply_effect = Signal(int, int, int, int, int, int)
     #: The scheme the list here has just made the active one. The same
     #: signal the profiles screen carries, and for the same reason: the
     #: screens share one store, so a switch changes what every one of
@@ -751,6 +757,11 @@ class MusicPage(QWidget):
         # second and the keyboard cannot take them.
         self._sender = QTimer(self)
         self._sender.timeout.connect(self._send)
+        #: True while the board is resting lit on a built-in effect
+        #: because nothing is playing.
+        self._resting = False
+        #: When the quiet started, or None while there is sound.
+        self._quiet_since = None
 
         # The board is a fixed size and the card is not, so the two are
         # put in a column of their own between stretches: that centres
@@ -814,6 +825,7 @@ class MusicPage(QWidget):
         self.start = primary_button("Start listening", self._start)
         actions.addWidget(self.start)
         actions.addWidget(ghost_button("Stop", self._stop))
+        actions.addWidget(primary_button("Apply to keyboard", self._apply))
         actions.addStretch()
 
         kept = caption(
@@ -1132,6 +1144,22 @@ class MusicPage(QWidget):
                 f"Will record this machine's output with {found[0]}.")
 
     # -- running --------------------------------------------------------
+    def _apply(self) -> None:
+        """Put this screen's lighting on the keyboard now.
+
+        Without sound there is nothing to react to, so this lights the
+        whole board and leaves it to the firmware to hold -- which is
+        also what happens by itself once the music stops. With sound it
+        is the bars, which the listener is already sending.
+        """
+        if self._capture is not None and not self._resting:
+            self.status.emit(
+                "the bars are already going to the keyboard — "
+                "about thirteen keys a second, which is the wire's limit")
+            return
+        self._resting = True
+        self.rest_now()
+
     def _start(self) -> None:
         if self._timer.isActive():
             return
@@ -1173,12 +1201,72 @@ class MusicPage(QWidget):
         # the sake of tidiness nobody asked for.
         self.status.emit("stopped listening")
 
+    #: Below this, every band counts as quiet. Not zero: a sink monitor
+    #: carries a little noise even with nothing playing.
+    SILENCE_LEVEL = 0.04
+
+    #: How long it has to stay quiet before the board rests. A gap
+    #: between tracks is a second or two; a rest that triggered on every
+    #: pause between beats would strobe.
+    SILENCE_MS = 1200
+
+    #: Brightness for the resting board.
+    REST_BRIGHTNESS = 100
+
     def _tick(self) -> None:
         levels = self._listen()
         if levels is None:
             return
         self.meter.show_levels(levels)
+        if self._quiet_now(levels):
+            return
         self._paint(levels)
+
+    def _quiet_now(self, levels: list[float]) -> bool:
+        """Rest the board when the music stops, and say so.
+
+        With nothing playing there is nothing to react to, and a board
+        that goes dark looks like the screen stopped working. So it
+        rests lit instead -- through the built-in effect command, which
+        lights every key in one transaction where the per-key path
+        would need ten seconds for the same thing.
+
+        Returns True while resting, so the caller leaves the board
+        alone: a single per-key write would drop it off the effect
+        layer and darken every key this screen is not painting.
+        """
+        quiet = max(levels, default=0.0) < self.SILENCE_LEVEL
+        if not quiet:
+            if self._resting:
+                self._resting = False
+                self._sent.clear()
+                self.status.emit("music again — back to the bars")
+            return False
+        if self._resting:
+            return True
+        self._quiet_since = self._quiet_since or time.monotonic()
+        if (time.monotonic() - self._quiet_since) * 1000 < self.SILENCE_MS:
+            return False
+        self._resting = True
+        self.rest_now()
+        return True
+
+    def rest_now(self) -> None:
+        """Light the whole board, through the firmware, in one command."""
+        colour = QColor(self._colour)
+        self.apply_effect.emit(
+            protocol.effect_mode("Static"),
+            colour.red(), colour.green(), colour.blue(),
+            self.REST_BRIGHTNESS, self.speed_for_rest())
+        self.board.colours = {k.light_index: colour for k in kb_layout.KEYS}
+        self.board.update()
+        self.status.emit(
+            "nothing playing — every key lit, held by the keyboard itself")
+
+    @staticmethod
+    def speed_for_rest() -> int:
+        # Static does not move, so the speed byte is only a placeholder.
+        return 15
 
     def _listen(self) -> list[float] | None:
         """Smoothed band levels, or None if there is nothing new yet."""
@@ -1249,7 +1337,7 @@ class MusicPage(QWidget):
         keys from a sine wave would look exactly like working audio,
         which is the one impression this screen must not give.
         """
-        if self._capture is None:
+        if self._capture is None or self._resting:
             return
         moved = []
         for index, colour in self._wire.items():
