@@ -1152,12 +1152,13 @@ class MusicPage(QWidget):
         also what happens by itself once the music stops. With sound it
         is the bars, which the listener is already sending.
         """
-        if self._capture is not None and not self._resting:
-            self.status.emit(
-                "the bars are already going to the keyboard — "
-                "about thirteen keys a second, which is the wire's limit")
-            return
+        # Always light the board. Refusing while the bars were running
+        # made the button look broken: it was pressed, the status line
+        # said something, and the keyboard did not change -- which is
+        # indistinguishable from nothing happening at all.
         self._resting = True
+        self._quiet_since = None
+        self._sent.clear()
         self.rest_now()
 
     def _start(self) -> None:

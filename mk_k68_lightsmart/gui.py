@@ -299,6 +299,33 @@ def caption(text: str) -> QLabel:
     return lb
 
 
+def _fit_label(button: QPushButton, side_padding: int) -> None:
+    """Make a button wide enough for the words on it.
+
+    Qt works a button's preferred width out from its text and its
+    *widget* font, and leaves stylesheet padding out of the sum. These
+    buttons take their padding and their font size from a stylesheet,
+    so Qt asks for less room than the label needs and a layout under
+    pressure hands over exactly that -- the text comes out clipped
+    mid-word.
+
+    So measure it here, in the same font the sheet sets, and ask for
+    the padding as well.
+    """
+    font = button.font()
+    font.setPixelSize(BUTTON_FONT_PX)
+    button.setFont(font)
+    width = QFontMetricsF(font).horizontalAdvance(button.text())
+    # The border and a little slack, because a fractional advance
+    # rounds down and the last glyph is what pays for it.
+    button.setMinimumWidth(int(width) + side_padding * 2 + 6)
+
+
+#: The font size both button styles set, in pixels, as the stylesheets
+#: below spell it. Named once so the measuring cannot drift from it.
+BUTTON_FONT_PX = 11
+
+
 def primary_button(text: str, on_click) -> QPushButton:
     """The accented action button, as the vendor UI draws it."""
     b = QPushButton(text)
@@ -309,6 +336,7 @@ def primary_button(text: str, on_click) -> QPushButton:
         "QPushButton:hover { background:#3dbdff; }"
         "QPushButton:disabled { background:#123a5c; color:#5b7894; }"
     )
+    _fit_label(b, 16)
     b.clicked.connect(on_click)
     return b
 
@@ -324,6 +352,7 @@ def ghost_button(text: str, on_click) -> QPushButton:
         "QPushButton:hover { color:#cfe3ff; border-color:#10a9fd; }"
         "QPushButton:disabled { color:#44607f; border-color:#0a2748; }"
     )
+    _fit_label(b, 14)
     b.clicked.connect(on_click)
     return b
 
