@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mk_k68_lightsmart import cli, matrix, patterns
+from rate_fixture import PinnedRate
 
 
 class DiagnosticPattern(unittest.TestCase):
@@ -102,14 +103,15 @@ class CommandLine(unittest.TestCase):
             self.skipTest("effects were not converted in this checkout")
         code, out = self.run_cli(["pattern", "matrix-plus", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertIn("100 ms a frame", out)
+        # Whatever the measured scale makes of the GIF's 100 ms.
+        want = matrix.frame_ms(patterns.source_speed("matrix-plus"))
+        self.assertIn(f"{want:.0f} ms a frame", out)
 
     def test_an_explicit_speed_still_wins(self):
         code, out = self.run_cli(
-            ["pattern", "tetris", "--speed", str(matrix.NATIVE_SPEED),
-             "--dry-run"])
+            ["pattern", "tetris", "--speed", "42", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertIn(f"speed {matrix.NATIVE_SPEED}", out)
+        self.assertIn("speed 42", out)
 
     def test_a_remap_dry_run_says_how_much_of_the_block_goes_out(self):
         code, out = self.run_cli(["remap", "--defaults", "--dry-run"])
@@ -179,6 +181,11 @@ class ProbePattern(unittest.TestCase):
 class CalibrateSpeed(unittest.TestCase):
     """The measurement that replaces the guessed frame rate."""
 
+    def setUp(self):
+        # A measurement takes effect in this process whether or not it
+        # is saved, so put the scale back for whatever runs next.
+        self.addCleanup(matrix.reload_calibration)
+
     def run_cli(self, argv):
         import contextlib
         import io
@@ -202,8 +209,51 @@ class CalibrateSpeed(unittest.TestCase):
         code, out = self.run_cli(["calibrate-speed", "--dry-run"])
         self.assertEqual(code, 0)
         self.assertIn("nothing sent", out)
-        self.assertIn(f"wire value {matrix.speed_to_byte(matrix.NATIVE_SPEED)}",
-                      out)
+        self.assertIn(
+            f"wire value {matrix.speed_to_byte(matrix.MEASURING_SPEED)}", out)
+
+    def _measure(self, argv):
+        """Run a real measurement with the upload stubbed out."""
+        import unittest.mock
+        with unittest.mock.patch.object(cli.protocol, "Keyboard") as kb:
+            kb.return_value.__enter__.return_value.upload_animation \
+                .return_value = 0
+            return self.run_cli(argv)
+
+    def test_a_watched_period_becomes_the_reading(self):
+        # 10 frames a loop at wire 66, one flash every 8s: 800 ms a
+        # frame, so 12.1 ms per unit of the speed byte.
+        code, out = self._measure(
+            ["calibrate-speed", "--seconds", "8"])
+        self.assertEqual(code, 0)
+        self.assertIn("800.0 ms at wire 66", out)
+        self.assertIn("12.121 ms", out)
+        self.assertIn("not saved", out)
+
+    def test_the_reading_is_not_kept_unless_asked(self):
+        before = matrix.load_calibration()
+        self._measure(["calibrate-speed", "--seconds", "8"])
+        self.assertEqual(matrix.load_calibration(), before)
+
+    def test_a_mistap_is_refused_rather_than_believed(self):
+        # The reading this command first took: five flashes supposedly
+        # 0.33s apart. No hand does that, and it was saved as fact.
+        import unittest.mock
+        with unittest.mock.patch.object(cli.time, "monotonic",
+                                        side_effect=[0.0, 1.64]), \
+             unittest.mock.patch.object(cli, "input", create=True,
+                                        side_effect=["", ""]):
+            code, out = self._measure(["calibrate-speed", "--tap", "--save"])
+        self.assertEqual(code, 1)
+        self.assertIn("too quick to have been tapped", out)
+
+    def test_a_reading_the_strip_could_not_draw_is_refused(self):
+        # 10 frames a loop flashing every 0.3s is 30 ms a frame at wire
+        # 66, which puts the fast end of the scale under a millisecond.
+        code, out = self._measure(
+            ["calibrate-speed", "--seconds", "0.3", "--save"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot draw", out)
 
     def test_it_measures_at_the_speed_it_was_asked_for(self):
         code, out = self.run_cli(

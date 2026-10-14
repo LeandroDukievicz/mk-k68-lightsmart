@@ -313,17 +313,43 @@ and the speed wire value is `0x66 - setting`, or `0x50` when the layer
 has none.
 
 What that byte *means* in milliseconds is not in the driver. It is a
-frame delay — the strip is slower at `0x80` than at `0x34` — but the
-unit was only ever guessed, by deciding that wire `0x42` looked like the
-100 ms the GIF it came from was authored at. That guess runs fast: at
-settings derived from it the strip steps frame by frame where the
-program's own preview of the same frames is fluid. So the unit is now a
-measurement the user takes once, with `calibrate-speed`, and is kept in
-`calibration.json` beside the schemes; the guess survives only as the
-fallback for a machine that never measured. Taking the reading at two
-different wire values is worth doing: two that agree say the byte is a
-plain multiple of a delay, two that disagree say there is a fixed cost
-per frame on top of it and one number is not enough to model it.
+frame delay — the strip is slower at `0x80` than at `0x34` — and the
+unit is **about 12.1 ms**, measured 2026-10-14: ten frames at wire
+`0x42` flashed once every 8 s, so 800 ms a frame.
+
+That is **eight times** the 1.5 ms the code assumed. The old figure came
+from deciding that wire `0x42` looked like the 100 ms its GIF was
+authored at; it is really 800. Everything derived from it ran the strip
+far slower than intended — the shipped default worked out to roughly
+half a second a frame, which is why the strip stepped frame by frame
+where the program's preview of the same frames was fluid.
+
+The measurement is consistent with the other three things ever written
+down about this byte, none of which the old unit fitted: wire `0x50`
+"reads slow" is 970 ms a frame, wire `0x02` is "a blur" at 24 ms, and
+the shipped default stepping visibly is 509 ms. The one observation it
+contradicts is the eyeballed anchor itself.
+
+So the unit is a measurement the user takes once, with
+`calibrate-speed`, kept in `calibration.json` beside the schemes; the
+guess survives only as the fallback for a machine that never measured.
+Two things to know about taking it:
+
+- **Be told the period, do not tap it.** The first reading taken here
+  was two Enters 1.64 s apart over five supposed flashes, which no hand
+  does, and it was saved as fact — 0.5 ms a unit, putting the fast end
+  of the scale under a millisecond a frame. Both the tap rate and the
+  implied fast end are now checked and refused.
+- **The model is proportional, on one point.** `ms = 12.1 × wire` fits
+  every observation above, but a second reading at a different wire is
+  what would separate it from `ms = a + b × wire`. Worth doing: at the
+  fast end the two disagree by a factor of three.
+
+The usable scale that falls out: wire `0x02`–`0x65` is **24 ms to
+1.2 s** a frame. So the granularity near 100 ms is coarse — 12 ms steps,
+and a 100 ms GIF lands on 97 ms at setting 94 — and a GIF thinned to
+every third frame, wanting 300 ms, now fits where the old unit said it
+could not.
 
 The driver counts blocks twice and can disagree with itself. It
 announces `((frames * 975 + 2) >> 6) + 1` (`0x42A095`-`0x42A0B1`) but

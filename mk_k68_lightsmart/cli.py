@@ -298,31 +298,69 @@ def cmd_calibrate_speed(args: argparse.Namespace) -> int:
 
     print()
     print("The strip now flashes once per loop.")
-    print(f"Press Enter on a flash, then again {args.loops} flashes later.")
-    print("(ctrl-c to give up)")
-    try:
-        input("  ready, press Enter on the next flash... ")
-        start = time.monotonic()
-        input(f"  now Enter on flash number {args.loops} after it... ")
-        elapsed = time.monotonic() - start
-    except (EOFError, KeyboardInterrupt):
-        print("\nnothing measured, nothing saved")
-        return 1
+    if args.seconds is not None:
+        loops, elapsed = 1, args.seconds
+        print(f"taking it as {args.seconds:g}s between flashes, as told")
+    elif args.tap:
+        # Tapping divides the reaction error by the loop count, but it
+        # only works if the taps land on flashes: the first reading
+        # taken here was two Enters 1.6s apart, which the strip could
+        # not have produced, and it was saved as fact. So the default
+        # is now to be told the period, and this is opt-in.
+        print(f"Press Enter on a flash, then again {args.loops} flashes "
+              "later. (ctrl-c to give up)")
+        try:
+            input("  ready, press Enter on the next flash... ")
+            start = time.monotonic()
+            input(f"  now Enter on flash number {args.loops} after it... ")
+            elapsed = time.monotonic() - start
+        except (EOFError, KeyboardInterrupt):
+            print("\nnothing measured, nothing saved")
+            return 1
+        loops = args.loops
+    else:
+        print("Watch it, then say how long one flash to the next takes.")
+        print("Timing several and dividing is better than guessing one.")
+        try:
+            answer = input("  seconds between flashes: ").strip()
+            elapsed, loops = float(answer.replace(",", ".")), 1
+        except (EOFError, KeyboardInterrupt):
+            print("\nnothing measured, nothing saved")
+            return 1
+        except ValueError:
+            print(f"{answer!r} is not a number of seconds")
+            return 1
 
     if elapsed <= 0.2:
         print(f"that was {elapsed:.2f}s -- too quick to be two flashes")
         return 1
 
-    loop_ms = elapsed * 1000 / args.loops
+    loop_ms = elapsed * 1000 / loops
+    # Nobody counts flashes three to the second. The first reading taken
+    # with this command was two Enters 1.64s apart over five loops, and
+    # it saved 0.5 ms a unit as fact; the limit that would have caught it
+    # is about the hand, not the hardware.
+    if args.tap and elapsed / loops < 0.8:
+        print(f"{elapsed:.2f}s for {loops} flashes is {elapsed / loops:.2f}s "
+              "each -- too quick to have been tapped. Watch it and use "
+              "--seconds instead.")
+        return 1
     frame_ms = loop_ms / args.frames
     unit = frame_ms / wire
 
     print()
-    print(f"measured      : {elapsed:.2f}s for {args.loops} loops")
+    print(f"measured      : {elapsed:.2f}s for {loops} loop(s)")
     print(f"a loop        : {loop_ms:.0f} ms")
     print(f"a frame       : {frame_ms:.1f} ms at wire {wire}")
     print(f"per unit      : {unit:.3f} ms  "
           f"(was {matrix.ms_per_speed_unit():.3f})")
+    # Held at the fastest the scale goes, a frame this short is not
+    # something 325 LEDs could have shown; the reading is wrong.
+    fastest = unit * matrix.speed_to_byte(100)
+    if fastest < 2:
+        print(f"that puts the fast end of the scale at {fastest:.2f} ms a "
+              "frame, which the strip cannot draw; nothing saved")
+        return 1
     if not 0.05 <= unit <= 200:
         print("that is not a plausible reading; nothing saved")
         return 1
@@ -492,7 +530,10 @@ def cmd_meter(args: argparse.Namespace) -> int:
         animation = matrix.Animation(
             frames=patterns.meter(readings, frames_each=args.frames_each),
             brightness=args.brightness,
-            speed=args.speed,
+            # The panels are drawn here, so there is no source rate to
+            # be faithful to; the artwork rate is the honest default.
+            speed=(matrix.default_playback_speed() if args.speed is None
+                   else args.speed),
         )
         if args.dry_run:
             print(f"dry run - {animation.block_count()} blocks, nothing sent")
@@ -811,14 +852,14 @@ def speed_help() -> str:
     """The --speed help, generated so a change of rate cannot stale it."""
     return (f"1-100; the default is the rate the vendor's own designs "
             f"assume, about "
-            f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
+            f"{matrix.frame_ms(matrix.default_playback_speed()):.0f} ms a frame")
 
 
 def source_speed_help() -> str:
     """The --speed help where the source brings a rate of its own."""
     return ("1-100; omit it to play the source at its own pace, which "
             f"for these is about "
-            f"{matrix.frame_ms(matrix.DEFAULT_PLAYBACK_SPEED):.0f} ms a frame")
+            f"{matrix.frame_ms(matrix.default_playback_speed()):.0f} ms a frame")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -920,7 +961,7 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--frames-each", type=int, default=1, dest="frames_each",
                    help="frames per panel (default 1)")
     m.add_argument("--brightness", type=int, default=100, help="0-100")
-    m.add_argument("--speed", type=int, default=matrix.DEFAULT_PLAYBACK_SPEED,
+    m.add_argument("--speed", type=int, default=None,
                    help=speed_help())
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
@@ -948,12 +989,17 @@ def main(argv: list[str] | None = None) -> int:
     cs = sub.add_parser(
         "calibrate-speed",
         help="measure how long the strip really holds a frame")
-    cs.add_argument("--speed", type=int, default=matrix.NATIVE_SPEED,
-                    help=f"1-100 to measure at (default {matrix.NATIVE_SPEED})")
+    cs.add_argument("--speed", type=int, default=matrix.MEASURING_SPEED,
+                    help="1-100 to measure at (default "
+                         f"{matrix.MEASURING_SPEED}, mid-scale)")
     cs.add_argument("--frames", type=int, default=10,
                     help="frames in the loop (default 10)")
     cs.add_argument("--loops", type=int, default=5,
-                    help="loops to time in one go (default 5)")
+                    help="loops to time in one go when tapping (default 5)")
+    cs.add_argument("--seconds", type=float, metavar="S",
+                    help="skip the watching: S seconds between flashes")
+    cs.add_argument("--tap", action="store_true",
+                    help="time it by pressing Enter on two flashes instead")
     cs.add_argument("--brightness", type=int, default=100, help="0-100")
     cs.add_argument("--save", action="store_true",
                     help="keep the reading for every later run")

@@ -529,7 +529,7 @@ class MatrixPage(QWidget):
         self.speed.setRange(self.SPEED_MIN, self.SPEED_MAX)
         # The rate the shipped effects were drawn at. Loading one, or
         # importing a GIF, replaces this with that source's own pace.
-        self.speed.setValue(matrix.DEFAULT_PLAYBACK_SPEED)
+        self.speed.setValue(matrix.default_playback_speed())
         self.speed.setFixedWidth(160)
         self.speed.valueChanged.connect(self._speed_changed)
         speed.addWidget(self.speed)

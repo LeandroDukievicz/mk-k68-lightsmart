@@ -24,6 +24,7 @@ except ImportError:                                   # pragma: no cover
     QApplication = None
 
 from mk_k68_lightsmart import matrix
+from rate_fixture import PinnedRate
 
 if QApplication is not None:
     from mk_k68_lightsmart import gui
@@ -371,7 +372,7 @@ class LightScreen(unittest.TestCase):
 
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed")
-class PlaybackRate(unittest.TestCase):
+class PlaybackRate(PinnedRate, unittest.TestCase):
     """The strip and the preview have to be asked for the same rate.
 
     They disagreed because the page sent the keyboard a speed nobody
@@ -380,12 +381,14 @@ class PlaybackRate(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        super().setUp()          # pins the scale before the page reads it
         self.page = gui.MatrixPage(lambda: QColor("#ffffff"))
 
     def test_the_preview_is_paced_by_the_slider(self):
         self.page.set_speed(matrix.speed_for_ms(100))
         self.assertAlmostEqual(
-            self.page._interval_ms(self.page.speed.value()), 100, delta=2)
+            self.page._interval_ms(self.page.speed.value()),
+            matrix.frame_ms(self.page.speed.value()), delta=1)
 
     def test_the_upload_carries_what_the_preview_played(self):
         self.page.set_speed(matrix.speed_for_ms(100))
@@ -408,31 +411,38 @@ class PlaybackRate(unittest.TestCase):
         self.page.load_built_in()
         self.assertEqual(self.page.speed.value(),
                          patterns.source_speed("matrix-plus"))
-        # 13 frames of a 100 ms GIF, kept whole, so 100 ms a frame.
-        self.assertAlmostEqual(
-            matrix.frame_ms(self.page.speed.value()), 100, delta=2)
+        # 13 frames of a 100 ms GIF, kept whole.
+        self.assert_closest_setting(self.page.speed.value(), 100)
 
     def test_a_generated_animation_takes_the_default(self):
         index = self.page.built_in.findData("tetris")
         self.page.built_in.setCurrentIndex(index)
         self.page.load_built_in()
         self.assertEqual(self.page.speed.value(),
-                         matrix.DEFAULT_PLAYBACK_SPEED)
+                         matrix.default_playback_speed())
 
     def test_an_unreachable_rate_is_said_out_loud(self):
-        # A GIF thinned to every third frame wants 300 ms a frame, which
-        # is past the end of the scale. Silence there would look like a
-        # bug in the strip.
+        # A GIF thinned to every third frame wants 300 ms a frame. On a
+        # scale that cannot hold it, silence would look like a bug in
+        # the strip -- so pin one that cannot and check it speaks.
+        matrix.set_ms_per_speed_unit(1.515)
         self.assertIn("stops at", self.page._rate_note(100, stride=3))
         self.assertEqual(self.page._rate_note(100, stride=1), "")
 
+    def test_a_reachable_rate_is_not_commented_on(self):
+        # The measured scale reaches 1.2s a frame, so the same thinned
+        # GIF now fits and there is nothing to warn about.
+        matrix.set_ms_per_speed_unit(12.121)
+        self.assertEqual(self.page._rate_note(100, stride=3), "")
+
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed")
-class ImportingKeepsTheFilesRate(unittest.TestCase):
+class ImportingKeepsTheFilesRate(PinnedRate, unittest.TestCase):
     """An imported file brings its own frame delay, and it is honoured."""
 
     def setUp(self) -> None:
         import tempfile
+        super().setUp()          # pins the scale before the page reads it
         self.page = gui.MatrixPage(lambda: QColor("#ffffff"))
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -449,8 +459,7 @@ class ImportingKeepsTheFilesRate(unittest.TestCase):
             self.page.import_image()
         # The fixture is a 100 ms GIF, as test_image checks.
         self.assertEqual(self.page.speed.value(), matrix.speed_for_source(100))
-        self.assertAlmostEqual(
-            matrix.frame_ms(self.page.speed.value()), 100, delta=2)
+        self.assert_closest_setting(self.page.speed.value(), 100)
 
     def test_a_thinned_import_is_held_for_the_frames_it_replaces(self):
         peek = gui.image.Imported(frames=[matrix.Frame()], available=312,
@@ -470,7 +479,8 @@ class ImportingKeepsTheFilesRate(unittest.TestCase):
             staticmethod(lambda *a, **k: (3, True))
         ):
             self.page.import_image()
-        # 300 ms a frame is past the end of the scale, so the page takes
-        # the slowest it has and says why rather than drifting quietly.
+        # Each survivor covers 300 ms of the source, so that is what is
+        # asked for -- clamped to the scale's end when it cannot be had.
+        self.assertEqual(self.page.speed.value(),
+                         matrix.speed_for_source(100, stride=3))
         self.assertEqual(self.page.speed.value(), matrix.speed_for_ms(300))
-        self.assertIn("stops at", notes[-1])

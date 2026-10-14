@@ -47,20 +47,27 @@ DEFAULT_SPEED = 0x50
 #: A layer's 1..100 speed setting is sent as this minus the setting.
 SPEED_BASE = 0x66
 
-#: Roughly how long the firmware holds a frame, per unit of the wire
-#: value, until someone measures it.
+#: How long the firmware holds a frame, per unit of the wire value, on
+#: the one keyboard this has been measured on.
 #:
-#: This number was never measured. It came from watching a library GIF
-#: and deciding wire 66 looked like the 100 ms the GIF was authored at,
-#: and everything the program says about rate is interpolated from that
-#: one eyeballed point. It is wrong in the slow direction -- the strip
-#: steps frame by frame where the preview is fluid -- which is what
-#: `calibrate-speed` exists to replace. Treat it as a starting guess,
-#: not a fact about the firmware.
+#: Measured 2026-10-14: ten frames at wire 66 flashed once every 8 s,
+#: so 800 ms a frame. It replaces a figure of 100/66 -- about 1.5 ms --
+#: that was never measured at all: it came from watching a library GIF
+#: and deciding wire 66 looked like the 100 ms the GIF was authored at.
+#: Wire 66 is 800 ms. Everything the program said about rate was
+#: interpolated from that point, including the timer the preview paced
+#: itself with, which is how the two could disagree while both claiming
+#: 64 ms a frame.
 #:
-#: Read it through :func:`ms_per_speed_unit`, which prefers a measured
-#: value when the user has taken one.
-FALLBACK_MS_PER_SPEED_UNIT = 100 / 66
+#: The reading is consistent with the other three things ever written
+#: down about this byte: wire 80 "reads slow" is 970 ms, wire 2 is "a
+#: blur" at 24 ms, and the old default stepping visibly is 509 ms.
+#:
+#: Still a fallback, not a fact about every unit: it is one reading
+#: from one keyboard running re-flashed V1.1 firmware. Read it through
+#: :func:`ms_per_speed_unit`, which prefers this machine's own
+#: measurement when there is one.
+FALLBACK_MS_PER_SPEED_UNIT = 12.121
 
 #: Kept so existing callers and tests still have a number to name. The
 #: functions do not read it; they read :func:`ms_per_speed_unit`.
@@ -148,26 +155,40 @@ def save_calibration(value: float) -> "Path":
     )
     return path
 
-#: The wire value that plays at the rate the vendor's own designs
-#: assume, and the 1-100 setting that sends it.
-NATIVE_WIRE_SPEED = 66
-NATIVE_SPEED = SPEED_BASE - NATIVE_WIRE_SPEED
+#: The rate the vendor's dot-matrix designs are drawn at. This one is
+#: not a guess: every GIF in the shipped set carries a 100 ms frame
+#: delay, and index.json records it per effect.
+#:
+#: There used to be a NATIVE_WIRE_SPEED of 66 here, described as "the
+#: wire value that plays at the rate the vendor's designs assume". It
+#: was the eyeballed anchor, and the measurement says wire 66 is 800 ms
+#: a frame, not 100. The artwork's rate is the durable fact; which wire
+#: value delivers it depends on a measurement, so it is derived now and
+#: no constant claims to know it.
+NATIVE_FRAME_MS = 100
 
-#: The setting every path defaults to when the source does not say:
-#: the rate the designs were drawn at.
-#:
-#: This used to be the native rate multiplied by a PLAYBACK_BOOST of
-#: 1.5625, on the reasoning that the native pace crawls across
-#: sixty-five columns. Two things were wrong with that. It made the
-#: strip disagree with the program's own preview of the same frames,
-#: which is the complaint that got it removed; and it moved every
-#: upload off wire 66, the single point on this scale that was ever
-#: checked against a running GIF. Everything below is interpolation
-#: from that one point, so the default now sits on it.
-#:
-#: Speeding playback up is still a slider away. It is no longer what
-#: the program does to frames nobody asked it to re-time.
-DEFAULT_PLAYBACK_SPEED = NATIVE_SPEED
+#: Where calibrate-speed measures, unless told otherwise. Mid-scale on
+#: purpose: ten frames at this wire value is a loop of several seconds,
+#: long enough to time by eye and short enough not to take a minute.
+MEASURING_WIRE_SPEED = 66
+MEASURING_SPEED = SPEED_BASE - MEASURING_WIRE_SPEED
+
+
+def default_playback_speed() -> int:
+    """The setting to use when the source names no rate of its own.
+
+    The vendor's artwork rate, turned into whatever setting delivers it
+    on this keyboard. A function and not a constant because the
+    conversion depends on the measurement, and a constant read at
+    import would freeze whatever the scale looked like then.
+
+    This used to be a fixed wire value times a PLAYBACK_BOOST of
+    1.5625, on the reasoning that the native pace crawls across
+    sixty-five columns. Both halves were wrong: the boost made the
+    strip disagree with the program's own preview of the same frames,
+    and the wire value it boosted away from was itself eight times off.
+    """
+    return speed_for_ms(NATIVE_FRAME_MS)
 
 BLOCK = 64
 
@@ -329,7 +350,7 @@ def speed_for_source(delay_ms: float, stride: int = 1) -> int:
     rather than claim a rate the strip cannot keep.
     """
     if delay_ms <= 0:
-        return DEFAULT_PLAYBACK_SPEED
+        return default_playback_speed()
     return speed_for_ms(delay_ms * max(1, stride))
 
 

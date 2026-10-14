@@ -237,14 +237,22 @@ as one animation — up to the firmware's 941.
   plays at 100 ms, and one thinned to every third frame asks for 300,
   which is past the end of the scale and said so rather than silently
   run fast.
-- **The rate wants measuring once.** Everything the program says about
-  frame rate comes from one number, milliseconds per unit of the speed
-  byte, and it was originally eyeballed rather than measured — which is
-  why the strip could step frame by frame where the preview was fluid.
-  Run `mk-k68-lightsmart calibrate-speed --save` once: it flashes the
-  strip a known number of times, you tap Enter on the first and last
-  flash, and the measurement is kept. Until then the slider's label
-  carries a `~`.
+- **The rate wants measuring once per keyboard.** Everything the
+  program says about frame rate comes from one number — milliseconds
+  per unit of the speed byte — and it was originally eyeballed rather
+  than measured. The guess was 1.5 ms; measured here it is **12.1 ms**,
+  eight times slower, which is why the strip stepped frame by frame
+  where the preview was fluid. Run it once:
+
+  ```sh
+  mk-k68-lightsmart calibrate-speed --save
+  ```
+
+  The strip flashes once per loop; watch it, time a few flashes, and
+  type the seconds between them. Until a reading exists the slider's
+  label carries a `~`, because the number it shows is a guess. The
+  usable scale on this firmware is 24 ms to 1.2 s a frame, in steps of
+  about 12 ms.
 - **Upload animation** streams the whole thing, with the same progress
   bar and Cancel as the Home screen. 59 frames is 899 blocks, about 14
   seconds.

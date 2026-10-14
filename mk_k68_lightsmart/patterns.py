@@ -15,12 +15,12 @@ from pathlib import Path
 
 from .matrix import (
     COLS,
-    DEFAULT_PLAYBACK_SPEED,
     FRAME_BYTES,
     LEDS,
     MAX_FRAMES_ANIMATION,
     ROWS,
     Frame,
+    default_playback_speed,
     speed_for_source,
 )
 
@@ -526,7 +526,7 @@ def source_speed(name: str) -> int:
     """
     entry = bundled().get(name)
     if entry is None:
-        return DEFAULT_PLAYBACK_SPEED
+        return default_playback_speed()
     return speed_for_source(entry.get("delay_ms") or 0,
                             entry.get("stride") or 1)
 

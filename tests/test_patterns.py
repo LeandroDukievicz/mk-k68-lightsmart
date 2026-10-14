@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mk_k68_lightsmart import matrix, patterns
+from rate_fixture import PinnedRate
 
 
 class TheWall(unittest.TestCase):
@@ -462,37 +463,49 @@ class Overall(unittest.TestCase):
         self.assertTrue(patterns.build(patterns.OVERALL))
 
 
-class SpeedMapping(unittest.TestCase):
-    """Calibrated by eye against a library GIF, which is 100 ms a frame."""
+class SpeedMapping(PinnedRate, unittest.TestCase):
+    """The shape of the scale, on the fallback rate so it is a fixed one."""
 
-    def test_the_native_setting_is_about_a_hundred_milliseconds(self):
-        self.assertAlmostEqual(matrix.frame_ms(matrix.NATIVE_SPEED), 100,
-                               delta=2)
+    def test_the_artwork_rate_is_reachable_on_the_scale(self):
+        # 100 ms a frame is what every shipped GIF was drawn at, so the
+        # scale has to be able to ask for it whatever the unit is.
+        self.assert_closest_setting(
+            matrix.default_playback_speed(), matrix.NATIVE_FRAME_MS)
+        self.assertLess(
+            abs(matrix.frame_ms(matrix.default_playback_speed())
+                - matrix.NATIVE_FRAME_MS),
+            matrix.ms_per_speed_unit())
 
     def test_the_scale_runs_backwards(self):
         self.assertLess(matrix.frame_ms(100), matrix.frame_ms(1))
 
     def test_a_duration_round_trips(self):
-        for ms in (20, 50, 100, 140):
-            self.assertAlmostEqual(
-                matrix.frame_ms(matrix.speed_for_ms(ms)), ms, delta=2)
+        # Within the scale's own granularity, which is a whole unit of
+        # the speed byte and coarse once the unit is measured.
+        for ms in (50, 100, 140):
+            self.assert_closest_setting(matrix.speed_for_ms(ms), ms)
 
     def test_asking_for_the_impossible_clamps(self):
         self.assertGreaterEqual(matrix.speed_for_ms(0), 1)
         self.assertLessEqual(matrix.speed_for_ms(10_000), 100)
 
-    def test_the_default_is_the_native_rate(self):
-        # Not a multiple of it. A boosted default is what made the
-        # strip disagree with the preview of the same frames, and it
-        # also moved every upload off the one wire value that was ever
-        # checked against a running GIF.
-        self.assertEqual(matrix.DEFAULT_PLAYBACK_SPEED, matrix.NATIVE_SPEED)
+    def test_the_default_is_the_artwork_rate_and_not_a_multiple(self):
+        # A boosted default is what made the strip disagree with the
+        # preview of the same frames.
+        self.assertEqual(matrix.default_playback_speed(),
+                         matrix.speed_for_ms(matrix.NATIVE_FRAME_MS))
+
+    def test_the_default_follows_the_measurement(self):
+        # The wire value that delivers 100 ms is not a constant: it
+        # depends on what a unit of the byte turned out to be.
+        matrix.set_ms_per_speed_unit(1.515)
+        slow_scale = matrix.default_playback_speed()
+        matrix.set_ms_per_speed_unit(12.121)
+        self.assertNotEqual(matrix.default_playback_speed(), slow_scale)
 
     def test_a_source_plays_at_the_delay_it_carries(self):
-        self.assertAlmostEqual(
-            matrix.frame_ms(matrix.speed_for_source(100)), 100, delta=2)
-        self.assertAlmostEqual(
-            matrix.frame_ms(matrix.speed_for_source(40)), 40, delta=2)
+        for ms in (40, 100):
+            self.assert_closest_setting(matrix.speed_for_source(ms), ms)
 
     def test_thinning_asks_for_the_time_the_skipped_frames_held(self):
         # Every third frame of a 100 ms GIF stands in for 300 ms of it,
@@ -501,14 +514,23 @@ class SpeedMapping(unittest.TestCase):
         self.assertEqual(matrix.speed_for_source(100, stride=3),
                          matrix.speed_for_ms(300))
 
-    def test_the_scale_cannot_reach_a_thinned_gifs_pace(self):
-        # 300 ms a frame is past the end of the scale -- one byte of
-        # delay units stops at slowest_frame_ms() -- so the setting
-        # clamps, and callers are told rather than left to assume.
+    def test_a_rate_past_the_end_of_the_scale_clamps_and_is_flagged(self):
+        # Whether 300 ms a frame fits depends on the measured unit, so
+        # the test pins a scale that cannot hold it rather than assuming
+        # one: at 1.5 ms a unit -- the old guess -- the slow end is 153.
+        matrix.set_ms_per_speed_unit(1.515)
         self.assertFalse(matrix.source_rate_is_reachable(100, stride=3))
         self.assertAlmostEqual(
             matrix.frame_ms(matrix.speed_for_source(100, stride=3)),
             matrix.slowest_frame_ms(), delta=0.01)
+
+    def test_a_measured_scale_can_reach_what_the_guess_could_not(self):
+        # The firmware is far slower per unit than the guess, which is
+        # what made a thinned GIF look unreachable in the first place.
+        matrix.set_ms_per_speed_unit(12.121)
+        self.assertTrue(matrix.source_rate_is_reachable(100, stride=3))
+        self.assert_closest_setting(
+            matrix.speed_for_source(100, stride=3), 300)
 
     def test_a_rate_inside_the_scale_is_reachable(self):
         self.assertTrue(matrix.source_rate_is_reachable(100))
@@ -518,10 +540,10 @@ class SpeedMapping(unittest.TestCase):
     def test_a_source_with_no_delay_falls_back_to_the_default(self):
         for delay in (0, -5):
             self.assertEqual(matrix.speed_for_source(delay),
-                             matrix.DEFAULT_PLAYBACK_SPEED)
+                             matrix.default_playback_speed())
 
 
-class ShippedEffectRates(unittest.TestCase):
+class ShippedEffectRates(PinnedRate, unittest.TestCase):
     """Each shipped effect plays at the pace of the GIF it came from."""
 
     def test_every_shipped_effect_names_its_own_rate(self):
@@ -532,20 +554,21 @@ class ShippedEffectRates(unittest.TestCase):
     def test_code_plus_plays_at_the_gifs_hundred_milliseconds(self):
         if "matrix-plus" not in patterns.bundled():
             self.skipTest("effects were not converted in this checkout")
-        self.assertAlmostEqual(
-            matrix.frame_ms(patterns.source_speed("matrix-plus")),
-            100, delta=2)
+        # 13 frames, 100 ms apart, kept whole -- so the closest the
+        # scale offers to 100 ms, whatever the scale turns out to be.
+        self.assert_closest_setting(
+            patterns.source_speed("matrix-plus"), 100)
 
     def test_a_generated_animation_takes_the_default(self):
         self.assertEqual(patterns.source_speed("tetris"),
-                         matrix.DEFAULT_PLAYBACK_SPEED)
+                         matrix.default_playback_speed())
 
     def test_the_default_is_a_setting_the_keyboard_accepts(self):
-        self.assertTrue(1 <= matrix.DEFAULT_PLAYBACK_SPEED <= 100)
+        self.assertTrue(1 <= matrix.default_playback_speed() <= 100)
         # Nothing was clamped on the way to the wire.
         self.assertEqual(
-            matrix.speed_to_byte(matrix.DEFAULT_PLAYBACK_SPEED),
-            matrix.SPEED_BASE - matrix.DEFAULT_PLAYBACK_SPEED)
+            matrix.speed_to_byte(matrix.default_playback_speed()),
+            matrix.SPEED_BASE - matrix.default_playback_speed())
 
 
 class Calibration(unittest.TestCase):
