@@ -909,9 +909,9 @@ class SessionsPage(QWidget):
         description = QLabel(
             "Cycles through Claude 5h, Claude 7d, Codex 5h and Codex 7d. "
             "The keyboard runs one looping animation, so the views change "
-            "without an upload or colored transition between them. Claude "
-            "is orange and Codex light blue; each usage bar follows its text. "
-            "Key-lighting effects remain independent."
+            "without an upload between them. Starting this also runs the "
+            "keyboard's Falling effect: orange for Claude and blue for Codex. "
+            "Each usage bar follows its full-size text; unused visor LEDs stay black."
         )
         description.setWordWrap(True)
         description.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
@@ -932,7 +932,7 @@ class SessionsPage(QWidget):
         inner.addWidget(self.stage)
 
         self.detail = QLabel(
-            "Start Sessions to load the four windows onto the keyboard."
+            "Start falling-sessions to sync the visor and keyboard lights."
         )
         self.detail.setAlignment(Qt.AlignCenter)
         self.detail.setWordWrap(True)
@@ -942,7 +942,7 @@ class SessionsPage(QWidget):
         controls = QHBoxLayout()
         controls.addStretch()
         self.start_button = primary_button(
-            "Start sessions", self.start_requested.emit)
+            "Start falling-sessions", self.start_requested.emit)
         self.stop_button = ghost_button("Stop", self.stop_requested.emit)
         self.stop_button.setEnabled(False)
         controls.addWidget(self.start_button)
@@ -980,7 +980,7 @@ class SessionsPage(QWidget):
         self.strip.load_frame(frame)
         percent = patterns.session_percent(reading, window)
         service = "Claude" if reading.tool == "claude" else "Codex"
-        self.stage.setText(f"{service} · {window.upper()}")
+        self.stage.setText(f"{service} · {window.upper()} · FALLING")
         if percent is None:
             if reading.tool == "claude":
                 self.detail.setText(
@@ -1136,6 +1136,14 @@ class LightPage(QWidget):
 
     def refresh_colour(self) -> None:
         """Refresh the preview after the shared Home color changes."""
+        self._update_colour_controls()
+
+    def select_effect_colour(self, mode: int, rgb: tuple[int, int, int]) -> None:
+        """Reflect an effect/color selected by an automatic lighting mode."""
+        effect = protocol.EFFECT_BY_MODE[mode]
+        self.effects.setCurrentRow(protocol.EFFECTS.index(effect))
+        self.random_colour.setChecked(False)
+        self._chosen_colour = QColor(*rgb)
         self._update_colour_controls()
 
     def pick_colour(self) -> None:
@@ -1335,7 +1343,9 @@ class MainWindow(QMainWindow):
         self._uploading = False
         self._close_after_upload = False
         self._sessions_active = False
+        self._sessions_falling = False
         self._session_step = 0
+        self._session_effect_tool = None
         self._session_readings = {}
         self._session_current_frame = None
         self._session_freeze_requested = False
@@ -1834,7 +1844,7 @@ class MainWindow(QMainWindow):
         self.set_status(f"connected — {path}", ok=True)
 
     def on_disconnected(self, why: str) -> None:
-        self.stop_sessions()
+        self.stop_sessions(restore_keyboard=False)
         self._connected = False
         if self._uploading:
             self._set_uploading(False)
@@ -1874,6 +1884,7 @@ class MainWindow(QMainWindow):
 
     # -- home screen ----------------------------------------------------
     def on_key(self, key: kb_layout.Key) -> None:
+        self.stop_sessions()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             protocol.MODE_SINGLE_KEY, rgb, p8=key.light_index, p10=0x0F, p11=0x0F
@@ -1907,6 +1918,7 @@ class MainWindow(QMainWindow):
         next effect; the keymap outlives the power cycle. A caller that
         has not asked anybody should pass False.
         """
+        self.stop_sessions()
         from . import store as scheme_store
 
         scheme = scheme_store.shared().current
@@ -1926,6 +1938,7 @@ class MainWindow(QMainWindow):
         The worker coalesces these by key, so sending a whole board at
         once costs one request per key rather than one per repaint.
         """
+        self.stop_sessions()
         self.request_key.emit(
             light_index, colour.red(), colour.green(), colour.blue())
 
@@ -1977,7 +1990,7 @@ class MainWindow(QMainWindow):
         self.request_upload.emit(animation)
 
     def start_sessions(self) -> None:
-        """Upload one looping animation of the four quota windows."""
+        """Start visor quota views and the synchronized keyboard Falling mode."""
         if not self._connected:
             self.set_status("connect the keyboard before starting Sessions",
                             ok=False)
@@ -1986,9 +1999,12 @@ class MainWindow(QMainWindow):
             reading.tool: reading for reading in usage.read_all()
         }
         self._sessions_active = True
+        self._sessions_falling = True
         self._session_step = 0
+        self._session_effect_tool = "claude"
         self._session_freeze_requested = False
         self.sessions_page.set_running(True)
+        self._set_session_keyboard_effect("claude")
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
         reading = (self._session_readings.get(tool)
                    or usage.empty(tool))
@@ -1998,14 +2014,19 @@ class MainWindow(QMainWindow):
         animation = patterns.session_animation(self._session_readings)
         self.start_upload(animation, from_sessions=True)
 
-    def stop_sessions(self, freeze: bool = False) -> None:
-        """Stop the preview; optionally upload the current view as a still."""
+    def stop_sessions(self, freeze: bool = False,
+                      restore_keyboard: bool = True) -> None:
+        """Stop synchronization and optionally freeze the visor's current view."""
         if not self._sessions_active:
             self._session_timer.stop()
             return
         self._sessions_active = False
         self._session_timer.stop()
         self.sessions_page.set_running(False)
+        if self._sessions_falling and restore_keyboard and self._connected:
+            self._set_session_keyboard_effect(
+                self._session_effect_tool or "claude", mode="Static")
+        self._sessions_falling = False
         if freeze and self._session_current_frame is not None:
             if self._uploading:
                 self._session_freeze_requested = True
@@ -2014,16 +2035,32 @@ class MainWindow(QMainWindow):
                 self._upload_session_still()
         else:
             self.set_status(
-                "Sessions stopped — the keyboard keeps its current loop "
-                "until another effect is uploaded")
+                "Falling color sync stopped — the visor loop stays loaded "
+                "until another animation is uploaded")
+
+    def _set_session_keyboard_effect(self, tool: str, mode: str = "Falling") -> None:
+        """Set the key backlight to the same service color as the visor."""
+        effect = protocol.EFFECT_BY_NAME[mode.lower()]
+        rgb = patterns.session_colour_rgb(tool)
+        self.light_page.select_effect_colour(effect.mode, rgb)
+        self.request_effect.emit(
+            effect.mode, *rgb, 0,
+            self.light_page.sliders["brightness"].value(),
+            self.light_page.sliders["speed"].value(),
+            self.light_page.sliders["direction"].value(),
+        )
 
     def advance_sessions(self) -> None:
         """Advance the GUI preview; the keyboard loops the uploaded copy."""
         if not self._sessions_active:
             return
+        previous_tool = patterns.SESSION_SEQUENCE[self._session_step][0]
         self._session_step = (self._session_step + 1) % len(
             patterns.SESSION_SEQUENCE)
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
+        if self._sessions_falling and tool != previous_tool:
+            self._session_effect_tool = tool
+            self._set_session_keyboard_effect(tool)
         reading = (self._session_readings.get(tool)
                    or usage.empty(tool))
         frame = patterns.session_screen(reading, window)
@@ -2084,6 +2121,7 @@ class MainWindow(QMainWindow):
             self.close()
 
     def apply_effect(self) -> None:
+        self.stop_sessions()
         mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
@@ -2105,6 +2143,7 @@ class MainWindow(QMainWindow):
         not, so they go out as the neutral values rather than as
         whatever the other screen was last set to.
         """
+        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{byte:02X}" for byte in protocol.data_frame(
@@ -2117,6 +2156,7 @@ class MainWindow(QMainWindow):
     def apply_light(self, mode: int, rgb: int, random_colour: int,
                     brightness: int, speed: int, direction: int) -> None:
         """The Light screen's own request, which carries a direction."""
+        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{b:02X}" for b in protocol.data_frame(

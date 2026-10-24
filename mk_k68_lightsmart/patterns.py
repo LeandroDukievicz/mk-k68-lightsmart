@@ -380,8 +380,8 @@ METER_IDLE = (0x606060, 0x141414)
 SESSION_SECONDS_EACH = 3
 METER_SECONDS_EACH = SESSION_SECONDS_EACH
 SESSION_COLOURS = {
-    "claude": (0xFF7A1A, 0x3A1A00),
-    "codex": (0x1A5FB4, 0x102B3D),
+    "claude": (0xFF7A1A, 0x000000),
+    "codex": (0x1A5FB4, 0x000000),
 }
 SESSION_FRAME_TARGET_MS = 1_000
 SESSION_SEQUENCE = (
@@ -401,13 +401,19 @@ def session_percent(reading, window: str) -> float | None:
     raise ValueError("session window is '5h' or '7d'")
 
 
+def session_colour_rgb(tool: str) -> tuple[int, int, int]:
+    """The bright display color, as RGB for the keyboard's Falling mode."""
+    packed = SESSION_COLOURS.get(tool, (0xFFFFFF, 0))[0]
+    return ((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
+
+
 def session_screen(reading, window: str) -> Frame:
     """One quota screen with text followed by its service-coloured bar."""
     from . import font
 
     percent = session_percent(reading, window)
     frame = Frame()
-    bright, dim = SESSION_COLOURS.get(reading.tool, (0xFFFFFF, 0x202020))
+    bright, dim = SESSION_COLOURS.get(reading.tool, (0xFFFFFF, 0x000000))
     amount = "--" if percent is None else f"{percent:.0f}%"
     label = f"{reading.tool.upper()} {window.upper()} {amount}"
     font.draw(frame, label, 1, bright)

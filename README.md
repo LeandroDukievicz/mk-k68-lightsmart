@@ -309,15 +309,16 @@ Useful for protocol work, since it sends one packet at a time.
 
 ### Session limits on the strip
 
-`sessions` cycles through Claude's 5-hour and 7-day windows, then
-Codex's 5-hour and 7-day windows, for about three seconds each. It uploads
-one looping animation, so the keyboard switches views directly without a
-colored upload screen between them. The percentages and bars show usage
-already consumed, not usage remaining. Claude is orange and Codex light blue;
-each bar is placed after the full-size label. Values are captured when the
-loop starts; run `sessions` again to refresh them. `./mk-k68-lightsmart sessions --dry-run`
-prints the four readings without connecting to the keyboard. Session displays
-use the visor strip and leave the keyboard key-lighting effects independent.
+`sessions` (also named `falling-sessions`) cycles through Claude's 5-hour and
+7-day windows, then Codex's 5-hour and 7-day windows, for about three seconds
+each. Starting it also runs the keyboard's built-in **Falling** effect. The
+keys stay orange during Claude's two screens and switch to the visor's blue
+when Codex appears. The visor animation is uploaded once; the views switch
+without per-screen uploads. Unused visor LEDs are black. The percentages and
+bars show usage already consumed, not usage remaining. Values are captured
+when the loop starts; run `sessions` again to refresh them. The CLI stays open
+while synchronizing and stops with Ctrl+C. `./mk-k68-lightsmart sessions --dry-run`
+prints the readings and colors without connecting to the keyboard.
 
 Codex limits come from its local session records. Claude limits are read
 from the same cache WatchAI uses: `~/.config/watchai/limits/claude.json`

@@ -554,7 +554,7 @@ def cmd_meter(args: argparse.Namespace) -> int:
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
-    """Upload one self-cycling animation of the four plan windows."""
+    """Run the visor cycle with Falling key lights synchronized by service."""
     from . import patterns, usage
 
     readings = {reading.tool: reading for reading in usage.read_all()}
@@ -567,15 +567,46 @@ def cmd_sessions(args: argparse.Namespace) -> int:
                 readings.get(tool) or usage.empty(tool), window)
             amount = "--" if percent is None else f"{percent:.0f}%"
             print(f"{tool:<7} {window.upper():>2}  {amount} used")
+        for tool in ("claude", "codex"):
+            rgb = patterns.session_colour_rgb(tool)
+            print(f"{tool:<7} Falling color  #{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
         print(f"dry run - {len(animation.frames)} frame loop, nothing sent")
         return 0
 
-    print("sessions: Claude 5h → Claude 7d → Codex 5h → Codex 7d")
-    print("uploading one looping animation; the keyboard changes screens "
-          "without another upload\n")
+    def set_keyboard_effect(tool: str, mode: str = "Falling") -> None:
+        kb.set_effect(
+            protocol.effect_mode(mode), patterns.session_colour_rgb(tool),
+            brightness=args.key_brightness, speed=args.key_speed,
+        )
+
+    print("falling-sessions: Claude 5h/7d orange ⇄ Codex 5h/7d blue")
+    print("the visor loops locally; key color changes at each service switch. "
+          "ctrl-c to stop\n")
+    step = 0
+    current_tool = patterns.SESSION_SEQUENCE[step][0]
     with protocol.Keyboard() as kb:
+        set_keyboard_effect(current_tool)
         kb.upload_animation(animation)
-    print("session loop is running on the keyboard")
+        print("Falling Sessions is running", flush=True)
+        try:
+            while True:
+                time.sleep(patterns.SESSION_SECONDS_EACH)
+                step = (step + 1) % len(patterns.SESSION_SEQUENCE)
+                tool, window = patterns.SESSION_SEQUENCE[step]
+                if tool != current_tool:
+                    current_tool = tool
+                    set_keyboard_effect(tool)
+                print(f"{tool:<7} {window.upper()}", flush=True)
+        except KeyboardInterrupt:
+            print("\nstopping Falling Sessions")
+            set_keyboard_effect(current_tool, mode="Static")
+            tool, window = patterns.SESSION_SEQUENCE[step]
+            reading = readings.get(tool) or usage.empty(tool)
+            kb.upload_animation(matrix.Animation(
+                frames=[patterns.session_screen(reading, window)],
+                brightness=args.brightness,
+                speed=matrix.default_playback_speed(),
+            ))
     return 0
 
 
@@ -993,10 +1024,13 @@ def main(argv: list[str] | None = None) -> int:
     m.set_defaults(func=cmd_meter)
 
     ss = sub.add_parser(
-        "sessions", help="loop Claude and Codex 5h/7d limits on the strip")
+        "sessions", aliases=["falling-sessions"],
+        help="synchronize Claude/Codex limits with the keyboard's Falling effect")
     ss.add_argument("--brightness", type=int, default=100, help="0-100")
     ss.add_argument("--speed", type=int, default=None,
                      help=speed_help())
+    ss.add_argument("--key-brightness", type=int, default=10, help="keyboard effect brightness, 0-15")
+    ss.add_argument("--key-speed", type=int, default=8, help="keyboard effect speed, 0-15")
     ss.add_argument("--dry-run", action="store_true")
     ss.set_defaults(func=cmd_sessions)
 

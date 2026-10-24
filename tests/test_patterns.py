@@ -15,11 +15,33 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mk_k68_lightsmart import matrix, patterns
 from rate_fixture import PinnedRate
+
+
+class SessionScreens(unittest.TestCase):
+    def reading(self, tool: str):
+        return SimpleNamespace(
+            tool=tool, plan_percent=50.0, plan_long_percent=50.0)
+
+    def test_session_palette_is_shared_with_keyboard_effect(self):
+        self.assertEqual(patterns.session_colour_rgb("claude"), (255, 122, 26))
+        self.assertEqual(patterns.session_colour_rgb("codex"), (26, 95, 180))
+
+    def test_empty_glyph_spaces_and_unfilled_bar_are_black(self):
+        claude = patterns.session_screen(self.reading("claude"), "5h")
+        codex = patterns.session_screen(self.reading("codex"), "5h")
+
+        # The hole in the U in CLAUDE and the inter-letter gap before X
+        # in CODEX must stay black, with no dark-red background pixels.
+        self.assertEqual(claude[14, 1], 0)
+        self.assertTrue(all(codex[16, row] == 0 for row in range(matrix.ROWS)))
+        self.assertLessEqual(set(claude.pixels), {0, 0xFF7A1A})
+        self.assertLessEqual(set(codex.pixels), {0, 0x1A5FB4})
 
 
 class TheWall(unittest.TestCase):
