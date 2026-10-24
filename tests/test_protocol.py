@@ -22,6 +22,12 @@ def hexs(data: bytes, n: int = 16) -> str:
 
 
 class ControlFraming(unittest.TestCase):
+    def test_session_effect_lead_covers_six_paced_reports(self):
+        self.assertAlmostEqual(
+            protocol.EFFECT_APPLY_LEAD_SECONDS,
+            6 * transport.PACING,
+        )
+
     def test_begin_matches_driver(self):
         # 0x416F6D: mov word [buf], 0x1804
         self.assertEqual(hexs(protocol.control(protocol.SUB_BEGIN), 4), "04 18 00 00")
@@ -142,6 +148,7 @@ class AnimationPayload(unittest.TestCase):
         count, speed = struct.unpack("<HH", a.payload()[:4])
         self.assertEqual(count, 3)
         self.assertEqual(speed, matrix.SPEED_BASE - 50)
+
 
     def test_an_animation_without_a_speed_sends_the_default(self):
         a = matrix.Animation(frames=self._frames(1))
@@ -341,10 +348,6 @@ class ReportDescriptorParsing(unittest.TestCase):
             transport._parse_report_descriptor(blob)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class RemapSlots(unittest.TestCase):
     """The addressing of a key-remap block.
 
@@ -470,6 +473,18 @@ class AckingTransport:
 
     def heads(self, n: int = 2) -> list[str]:
         return [hexs(p, n) for p in self.sent]
+
+
+class AnimationApplyCallback(unittest.TestCase):
+    def test_apply_callback_runs_on_the_apply_report(self):
+        t = AckingTransport()
+        applied = []
+        animation = matrix.Animation(frames=[matrix.Frame()], speed=50)
+
+        protocol.Keyboard(t).upload_animation(
+            animation, on_apply=lambda: applied.append(t.heads()[-1]))
+
+        self.assertEqual(applied, ["04 02"])
 
 
 class KeymapWrite(unittest.TestCase):
@@ -755,3 +770,7 @@ class BothWedgedStates(unittest.TestCase):
     def test_a_healthy_keyboard_is_neither(self):
         kb = protocol.Keyboard(self.Answering(transport.ACK_OK))
         self.assertFalse(kb.wedged())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

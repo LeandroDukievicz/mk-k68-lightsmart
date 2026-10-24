@@ -585,28 +585,46 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     step = 0
     current_tool = patterns.SESSION_SEQUENCE[step][0]
     with protocol.Keyboard() as kb:
+        set_keyboard_effect(current_tool)
         kb.upload_animation(animation)
         started_at = time.monotonic()
-        set_keyboard_effect(current_tool)
         dwell = patterns.session_timing(animation.speed)[2] / 1000
         tick_count = 0
+        next_colour_tick = 2
         print("Falling Sessions is running", flush=True)
         try:
             while True:
-                deadline = started_at + (tick_count + 1) * dwell
+                screen_deadline = started_at + (tick_count + 1) * dwell
+                colour_deadline = (
+                    started_at + next_colour_tick * dwell
+                    - protocol.EFFECT_APPLY_LEAD_SECONDS
+                )
+                deadline = min(screen_deadline, colour_deadline)
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
                     time.sleep(remaining)
+                now = time.monotonic()
+                if now >= colour_deadline:
+                    elapsed_ticks = int((now - started_at) / dwell)
+                    colour_tick = (next_colour_tick
+                                   if elapsed_ticks < next_colour_tick + 2
+                                   else elapsed_ticks)
+                    tool = patterns.SESSION_SEQUENCE[
+                        colour_tick % len(patterns.SESSION_SEQUENCE)][0]
+                    if tool != current_tool:
+                        current_tool = tool
+                        set_keyboard_effect(tool)
+                    next_colour_tick = (
+                        next_colour_tick + 2
+                        if elapsed_ticks < next_colour_tick + 2
+                        else (elapsed_ticks // 2 + 1) * 2
+                    )
                 elapsed_ticks = int((time.monotonic() - started_at) / dwell)
-                if elapsed_ticks <= tick_count:
-                    continue
-                tick_count = elapsed_ticks
-                step = tick_count % len(patterns.SESSION_SEQUENCE)
-                tool, window = patterns.SESSION_SEQUENCE[step]
-                if tool != current_tool:
-                    current_tool = tool
-                    set_keyboard_effect(tool)
-                print(f"{tool:<7} {window.upper()}", flush=True)
+                if elapsed_ticks > tick_count:
+                    tick_count = elapsed_ticks
+                    step = tick_count % len(patterns.SESSION_SEQUENCE)
+                    tool, window = patterns.SESSION_SEQUENCE[step]
+                    print(f"{tool:<7} {window.upper()}", flush=True)
         except KeyboardInterrupt:
             print("\nstopping Falling Sessions")
             set_keyboard_effect(current_tool, mode="Static")

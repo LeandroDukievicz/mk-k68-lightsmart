@@ -1361,6 +1361,12 @@ class MainWindow(QMainWindow):
         self._session_timer.setSingleShot(True)
         self._session_timer.setTimerType(Qt.PreciseTimer)
         self._session_timer.timeout.connect(self.advance_sessions)
+        self._session_effect_timer = QTimer(self)
+        self._session_effect_timer.setSingleShot(True)
+        self._session_effect_timer.setTimerType(Qt.PreciseTimer)
+        self._session_effect_timer.timeout.connect(
+            self.advance_session_effect)
+        self._session_next_effect_tick = 2
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -2017,6 +2023,9 @@ class MainWindow(QMainWindow):
         self._session_upload_pending = True
         self._session_upload_applied_at = None
         self._session_effect_tool = "claude"
+        self._session_next_effect_tick = 2
+        self._session_timer.stop()
+        self._session_effect_timer.stop()
         self._session_freeze_requested = False
         self.sessions_page.set_running(True)
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
@@ -2025,6 +2034,8 @@ class MainWindow(QMainWindow):
         self._session_current_frame = patterns.session_screen(reading, window)
         self.sessions_page.show_screen(
             reading, window, self._session_current_frame)
+        self._set_session_keyboard_effect("claude")
+        self._session_effect_started = True
         self.start_upload(animation, from_sessions=True)
 
     def stop_sessions(self, freeze: bool = False,
@@ -2035,6 +2046,7 @@ class MainWindow(QMainWindow):
             return
         self._sessions_active = False
         self._session_timer.stop()
+        self._session_effect_timer.stop()
         self._session_started_at = None
         self._session_upload_pending = False
         self.sessions_page.set_running(False)
@@ -2077,18 +2089,55 @@ class MainWindow(QMainWindow):
             self._schedule_session_tick()
             return
         self._session_tick_count = completed_ticks
-        previous_tool = patterns.SESSION_SEQUENCE[self._session_step][0]
         self._session_step = completed_ticks % len(patterns.SESSION_SEQUENCE)
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
-        if self._sessions_falling and tool != previous_tool:
-            self._session_effect_tool = tool
-            self._set_session_keyboard_effect(tool)
         reading = (self._session_readings.get(tool)
                    or usage.empty(tool))
         frame = patterns.session_screen(reading, window)
         self._session_current_frame = frame
         self.sessions_page.show_screen(reading, window, frame)
         self._schedule_session_tick()
+
+    def advance_session_effect(self) -> None:
+        """Queue color before the visor boundary by the USB apply latency."""
+        if not self._sessions_active or self._session_started_at is None:
+            return
+        tick = self._session_next_effect_tick
+        deadline = (self._session_started_at +
+                    tick * self._session_dwell_ms / 1000 -
+                    protocol.EFFECT_APPLY_LEAD_SECONDS)
+        now = time.monotonic()
+        if now < deadline:
+            delay_ms = max(1, math.ceil((deadline - now) * 1000))
+            self._session_effect_timer.start(delay_ms)
+            return
+
+        elapsed_tick = int(
+            (now - self._session_started_at) * 1000 /
+            self._session_dwell_ms)
+        target_tick = tick if elapsed_tick < tick + 2 else elapsed_tick
+        tool = patterns.SESSION_SEQUENCE[
+            target_tick % len(patterns.SESSION_SEQUENCE)][0]
+        if tool != self._session_effect_tool:
+            self._session_effect_tool = tool
+            self._set_session_keyboard_effect(tool)
+        self._session_next_effect_tick = (
+            tick + 2 if elapsed_tick < tick + 2
+            else (elapsed_tick // 2 + 1) * 2
+        )
+        self._schedule_session_effect_change()
+
+    def _schedule_session_effect_change(self) -> None:
+        """Dispatch key color early enough to commit at the screen boundary."""
+        if not self._sessions_active or self._session_started_at is None:
+            return
+        deadline = (self._session_started_at +
+                    self._session_next_effect_tick *
+                    self._session_dwell_ms / 1000 -
+                    protocol.EFFECT_APPLY_LEAD_SECONDS)
+        delay_ms = max(
+            1, math.ceil((deadline - time.monotonic()) * 1000))
+        self._session_effect_timer.start(delay_ms)
 
     def _schedule_session_tick(self) -> None:
         """Schedule against the loop start so event handling cannot drift."""
@@ -2148,6 +2197,8 @@ class MainWindow(QMainWindow):
             self._upload_session_still()
         elif self._sessions_active:
             if not ok:
+                if self._session_effect_started and self._connected:
+                    self._set_session_keyboard_effect("claude", mode="Static")
                 self._sessions_active = False
                 self._sessions_falling = False
                 self._session_effect_started = False
@@ -2165,15 +2216,18 @@ class MainWindow(QMainWindow):
                 self._session_step = self._session_tick_count % len(
                     patterns.SESSION_SEQUENCE)
                 tool, window = patterns.SESSION_SEQUENCE[self._session_step]
-                self._session_effect_tool = tool
-                self._set_session_keyboard_effect(tool)
-                self._session_effect_started = True
+                if tool != self._session_effect_tool:
+                    self._session_effect_tool = tool
+                    self._set_session_keyboard_effect(tool)
+                self._session_next_effect_tick = (
+                    (self._session_tick_count // 2) + 1) * 2
                 reading = (self._session_readings.get(tool)
                            or usage.empty(tool))
                 frame = patterns.session_screen(reading, window)
                 self._session_current_frame = frame
                 self.sessions_page.show_screen(reading, window, frame)
                 self._schedule_session_tick()
+                self._schedule_session_effect_change()
         if self._close_after_upload:
             self.close()
 

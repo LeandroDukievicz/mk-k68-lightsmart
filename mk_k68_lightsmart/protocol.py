@@ -41,6 +41,7 @@ from .transport import (
     ACK_RETRY,
     ACK_STUCK,
     FLUSH_PACING,
+    PACING,
     REPORT_SIZE,
     DeviceGone,
     KT68Transport,
@@ -80,6 +81,10 @@ SUB_READ_FRAME = 0xF5    #: read the keys' live frame back (byte 8 = 0x09)
 #: Byte 0 of a data frame when the frame sets one key's colour outright
 #: instead of selecting a built-in animation.
 MODE_SINGLE_KEY = 0x80
+
+# begin/write+ack, select/write+ack, data/write, and apply/write. Queue a
+# synchronized color change this far before the visor's next view boundary.
+EFFECT_APPLY_LEAD_SECONDS = 6 * PACING
 
 FRAME_MAGIC = (0xAA, 0x55)
 FRAME_SIZE = 16
@@ -304,18 +309,23 @@ class Keyboard:
             self.t.close()
 
     # -- framed steps ---------------------------------------------------
-    def _step(self, payload: bytes, expect_ack: bool = True) -> None:
+    def _step(self, payload: bytes, expect_ack: bool = True,
+              after_send=None) -> None:
         """Send one payload, optionally waiting for the keyboard's ack.
 
         The driver retries once when the keyboard answers ``0xFF``, so we
         do the same rather than failing on a transient busy reply.
         """
         self.t.set_feature(payload)
+        if after_send is not None:
+            after_send()
         if not expect_ack:
             return
         reply = self.t.get_feature()
         if reply[ACK_OFFSET] == ACK_RETRY:
             self.t.set_feature(payload)
+            if after_send is not None:
+                after_send()
             reply = self.t.get_feature()
         if reply[ACK_OFFSET] != ACK_OK:
             name = " ".join(f"{b:#04x}" for b in payload[:2])
@@ -439,7 +449,8 @@ class Keyboard:
             data_frame(mode, rgb, random_colour, brightness, speed, direction))
 
     # -- dot-matrix strip -----------------------------------------------
-    def upload_animation(self, animation, progress=None, drain=None) -> int:
+    def upload_animation(self, animation, progress=None, drain=None,
+                         on_apply=None) -> int:
         """Push an animation to the 65x5 strip.
 
         Mirrors the driver's bulk path: announce the block count, stream
@@ -463,7 +474,8 @@ class Keyboard:
         ``progress`` is called with ``(chunk, total)`` as the payload goes
         out, so a GUI can show a bar; raising from it is how a caller
         cancels. ``drain`` is called with ``(sent, total)`` while the
-        blanks go out, and must not raise. Returns the chunks sent.
+        blanks go out, and must not raise. ``on_apply`` runs immediately
+        after the apply report is sent. Returns the chunks sent.
         """
         payload = animation.payload()
         if len(payload) % REPORT_SIZE:
@@ -496,7 +508,7 @@ class Keyboard:
                 self._drain_blocks(blocks - sent, drain)
                 self._apply_quietly()
                 raise
-            self._step(control(SUB_APPLY))
+            self._step(control(SUB_APPLY), after_send=on_apply)
         finally:
             self._end_quietly()
         return sent

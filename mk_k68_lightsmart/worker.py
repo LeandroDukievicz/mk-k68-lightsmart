@@ -283,8 +283,12 @@ class DeviceWorker(QObject):
             total = at_stop["total"] or at_stop["sent"] + remaining
             self.progress.emit(at_stop["sent"] + done, total)
 
+        def applied() -> None:
+            self.upload_applied_at.emit(time.monotonic())
+
         try:
-            self.kb.upload_animation(animation, progress=report, drain=draining)
+            self.kb.upload_animation(
+                animation, progress=report, drain=draining, on_apply=applied)
         except Cancelled:
             self.status.emit("upload cancelled", False)
             self.upload_finished.emit(False)
@@ -296,7 +300,6 @@ class DeviceWorker(QObject):
             self.status.emit(f"upload failed: {exc}", False)
             self.upload_finished.emit(False)
         else:
-            self.upload_applied_at.emit(time.monotonic())
             self.status.emit("animation applied", True)
             self.upload_finished.emit(True)
 
