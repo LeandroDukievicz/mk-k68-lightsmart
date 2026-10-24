@@ -8,8 +8,10 @@ nothing of the manufacturer's ships here.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -1344,15 +1346,20 @@ class MainWindow(QMainWindow):
         self._close_after_upload = False
         self._sessions_active = False
         self._sessions_falling = False
+        self._session_effect_started = False
         self._session_step = 0
+        self._session_tick_count = 0
+        self._session_dwell_ms = 0.0
+        self._session_started_at = None
+        self._session_upload_pending = False
+        self._session_upload_applied_at = None
         self._session_effect_tool = None
         self._session_readings = {}
         self._session_current_frame = None
         self._session_freeze_requested = False
         self._session_timer = QTimer(self)
-        self._session_timer.setInterval(
-            patterns.SESSION_SECONDS_EACH * 1000)
         self._session_timer.setSingleShot(True)
+        self._session_timer.setTimerType(Qt.PreciseTimer)
         self._session_timer.timeout.connect(self.advance_sessions)
 
         root = QWidget()
@@ -1814,6 +1821,7 @@ class MainWindow(QMainWindow):
         w.status.connect(self.set_status)
         w.key_applied.connect(self.on_key_applied)
         w.progress.connect(self.on_progress)
+        w.upload_applied_at.connect(self.on_session_upload_applied_at)
         w.upload_finished.connect(self.on_upload_finished)
         # These cross into the worker's thread, so Qt queues them and the
         # worker runs them one after another -- which is also what keeps
@@ -1998,20 +2006,25 @@ class MainWindow(QMainWindow):
         self._session_readings = {
             reading.tool: reading for reading in usage.read_all()
         }
+        animation = patterns.session_animation(self._session_readings)
         self._sessions_active = True
         self._sessions_falling = True
+        self._session_effect_started = False
         self._session_step = 0
+        self._session_tick_count = 0
+        self._session_dwell_ms = patterns.session_timing(animation.speed)[2]
+        self._session_started_at = None
+        self._session_upload_pending = True
+        self._session_upload_applied_at = None
         self._session_effect_tool = "claude"
         self._session_freeze_requested = False
         self.sessions_page.set_running(True)
-        self._set_session_keyboard_effect("claude")
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
         reading = (self._session_readings.get(tool)
                    or usage.empty(tool))
         self._session_current_frame = patterns.session_screen(reading, window)
         self.sessions_page.show_screen(
             reading, window, self._session_current_frame)
-        animation = patterns.session_animation(self._session_readings)
         self.start_upload(animation, from_sessions=True)
 
     def stop_sessions(self, freeze: bool = False,
@@ -2022,11 +2035,15 @@ class MainWindow(QMainWindow):
             return
         self._sessions_active = False
         self._session_timer.stop()
+        self._session_started_at = None
+        self._session_upload_pending = False
         self.sessions_page.set_running(False)
-        if self._sessions_falling and restore_keyboard and self._connected:
+        if (self._sessions_falling and self._session_effect_started
+                and restore_keyboard and self._connected):
             self._set_session_keyboard_effect(
                 self._session_effect_tool or "claude", mode="Static")
         self._sessions_falling = False
+        self._session_effect_started = False
         if freeze and self._session_current_frame is not None:
             if self._uploading:
                 self._session_freeze_requested = True
@@ -2051,12 +2068,17 @@ class MainWindow(QMainWindow):
         )
 
     def advance_sessions(self) -> None:
-        """Advance the GUI preview; the keyboard loops the uploaded copy."""
-        if not self._sessions_active:
+        """Follow the uploaded loop's precise frame schedule."""
+        if not self._sessions_active or self._session_started_at is None:
             return
+        elapsed_ms = (time.monotonic() - self._session_started_at) * 1000
+        completed_ticks = int(elapsed_ms / self._session_dwell_ms)
+        if completed_ticks <= self._session_tick_count:
+            self._schedule_session_tick()
+            return
+        self._session_tick_count = completed_ticks
         previous_tool = patterns.SESSION_SEQUENCE[self._session_step][0]
-        self._session_step = (self._session_step + 1) % len(
-            patterns.SESSION_SEQUENCE)
+        self._session_step = completed_ticks % len(patterns.SESSION_SEQUENCE)
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
         if self._sessions_falling and tool != previous_tool:
             self._session_effect_tool = tool
@@ -2066,7 +2088,16 @@ class MainWindow(QMainWindow):
         frame = patterns.session_screen(reading, window)
         self._session_current_frame = frame
         self.sessions_page.show_screen(reading, window, frame)
-        self._session_timer.start()
+        self._schedule_session_tick()
+
+    def _schedule_session_tick(self) -> None:
+        """Schedule against the loop start so event handling cannot drift."""
+        if self._session_started_at is None or not self._sessions_active:
+            return
+        deadline = self._session_started_at + (
+            (self._session_tick_count + 1) * self._session_dwell_ms / 1000)
+        delay_ms = max(1, math.ceil((deadline - time.monotonic()) * 1000))
+        self._session_timer.start(delay_ms)
 
     def _upload_session_still(self) -> None:
         """Freeze the last previewed view with one still-frame upload."""
@@ -2116,9 +2147,40 @@ class MainWindow(QMainWindow):
             self._session_freeze_requested = False
             self._upload_session_still()
         elif self._sessions_active:
-            self._session_timer.start()
+            if not ok:
+                self._sessions_active = False
+                self._sessions_falling = False
+                self._session_effect_started = False
+                self._session_upload_pending = False
+                self.sessions_page.set_running(False)
+            else:
+                started_at = (self._session_upload_applied_at
+                              or time.monotonic())
+                self._session_upload_pending = False
+                self._session_started_at = started_at
+                elapsed_ms = max(
+                    0.0, (time.monotonic() - started_at) * 1000)
+                self._session_tick_count = int(
+                    elapsed_ms / self._session_dwell_ms)
+                self._session_step = self._session_tick_count % len(
+                    patterns.SESSION_SEQUENCE)
+                tool, window = patterns.SESSION_SEQUENCE[self._session_step]
+                self._session_effect_tool = tool
+                self._set_session_keyboard_effect(tool)
+                self._session_effect_started = True
+                reading = (self._session_readings.get(tool)
+                           or usage.empty(tool))
+                frame = patterns.session_screen(reading, window)
+                self._session_current_frame = frame
+                self.sessions_page.show_screen(reading, window, frame)
+                self._schedule_session_tick()
         if self._close_after_upload:
             self.close()
+
+    def on_session_upload_applied_at(self, applied_at: float) -> None:
+        """Keep the keyboard playback start as the cycle's timing origin."""
+        if self._session_upload_pending:
+            self._session_upload_applied_at = applied_at
 
     def apply_effect(self) -> None:
         self.stop_sessions()

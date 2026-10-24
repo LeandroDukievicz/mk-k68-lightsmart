@@ -44,6 +44,21 @@ class SessionScreens(unittest.TestCase):
         self.assertLessEqual(set(codex.pixels), {0, 0x1A5FB4})
 
 
+class SessionTiming(PinnedRate, unittest.TestCase):
+    def test_reported_dwell_matches_frames_per_view(self):
+        animation = patterns.session_animation({})
+        speed, frames_per_view, dwell_ms = patterns.session_timing(
+            animation.speed)
+
+        self.assertEqual(speed, animation.speed)
+        self.assertEqual(
+            len(animation.frames),
+            frames_per_view * len(patterns.SESSION_SEQUENCE),
+        )
+        self.assertAlmostEqual(
+            dwell_ms, frames_per_view * matrix.frame_ms(animation.speed))
+
+
 class TheWall(unittest.TestCase):
     def test_the_last_frame_is_every_led(self):
         last = patterns.tetris_fill()[-1]

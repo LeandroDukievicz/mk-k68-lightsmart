@@ -313,12 +313,15 @@ Useful for protocol work, since it sends one packet at a time.
 7-day windows, then Codex's 5-hour and 7-day windows, for about three seconds
 each. Starting it also runs the keyboard's built-in **Falling** effect. The
 keys stay orange during Claude's two screens and switch to the visor's blue
-when Codex appears. The visor animation is uploaded once; the views switch
-without per-screen uploads. Unused visor LEDs are black. The percentages and
-bars show usage already consumed, not usage remaining. Values are captured
-when the loop starts; run `sessions` again to refresh them. The CLI stays open
-while synchronizing and stops with Ctrl+C. `./mk-k68-lightsmart sessions --dry-run`
-prints the readings and colors without connecting to the keyboard.
+when Codex appears. The color timer uses the same frame duration and a
+monotonic clock as the visor loop, so their service changes stay aligned
+through repeated cycles. The visor animation is uploaded once; the views
+switch without per-screen uploads. Unused visor LEDs are black. The
+percentages and bars show usage already consumed, not usage remaining. Values
+are captured when the loop starts; run `sessions` again to refresh them. The
+CLI stays open while synchronizing and stops with Ctrl+C.
+`./mk-k68-lightsmart sessions --dry-run` prints the readings and colors
+without connecting to the keyboard.
 
 Codex limits come from its local session records. Claude limits are read
 from the same cache WatchAI uses: `~/.config/watchai/limits/claude.json`

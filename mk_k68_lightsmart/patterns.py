@@ -392,6 +392,18 @@ SESSION_SEQUENCE = (
 )
 
 
+def session_timing(speed: int | None = None) -> tuple[int, int, float]:
+    """Return playback speed, frames per view, and the matching view dwell."""
+    play_speed = speed if speed is not None else speed_for_ms(
+        SESSION_FRAME_TARGET_MS)
+    frame_duration = frame_ms(play_speed)
+    per_view = max(1, round(
+        SESSION_SECONDS_EACH * 1000 / frame_duration))
+    per_view = min(
+        per_view, MAX_FRAMES_ANIMATION // len(SESSION_SEQUENCE))
+    return play_speed, per_view, per_view * frame_duration
+
+
 def session_percent(reading, window: str) -> float | None:
     """Used percentage for the short or long plan window."""
     if window == "5h":
@@ -439,11 +451,7 @@ def session_animation(readings, brightness: int = 100,
     """
     by_tool = ({reading.tool: reading for reading in readings}
                if not isinstance(readings, dict) else readings)
-    play_speed = speed if speed is not None else speed_for_ms(
-        SESSION_FRAME_TARGET_MS)
-    per_view = max(1, round(
-        SESSION_SECONDS_EACH * 1000 / frame_ms(play_speed)))
-    per_view = min(per_view, MAX_FRAMES_ANIMATION // len(SESSION_SEQUENCE))
+    play_speed, per_view, _dwell_ms = session_timing(speed)
 
     from .usage import empty
 

@@ -18,6 +18,7 @@ descriptor is only ever touched by the thread that ioctls it.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -58,6 +59,7 @@ class DeviceWorker(QObject):
     progress = Signal(int, int)
     #: an upload ended; True if it completed
     upload_finished = Signal(bool)
+    upload_applied_at = Signal(float)
 
     #: Emit at most one progress update per this many blocks. 14,336
     #: repaints would cost more than the transfers.
@@ -294,6 +296,7 @@ class DeviceWorker(QObject):
             self.status.emit(f"upload failed: {exc}", False)
             self.upload_finished.emit(False)
         else:
+            self.upload_applied_at.emit(time.monotonic())
             self.status.emit("animation applied", True)
             self.upload_finished.emit(True)
 

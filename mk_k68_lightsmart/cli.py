@@ -585,13 +585,23 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     step = 0
     current_tool = patterns.SESSION_SEQUENCE[step][0]
     with protocol.Keyboard() as kb:
-        set_keyboard_effect(current_tool)
         kb.upload_animation(animation)
+        started_at = time.monotonic()
+        set_keyboard_effect(current_tool)
+        dwell = patterns.session_timing(animation.speed)[2] / 1000
+        tick_count = 0
         print("Falling Sessions is running", flush=True)
         try:
             while True:
-                time.sleep(patterns.SESSION_SECONDS_EACH)
-                step = (step + 1) % len(patterns.SESSION_SEQUENCE)
+                deadline = started_at + (tick_count + 1) * dwell
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                elapsed_ticks = int((time.monotonic() - started_at) / dwell)
+                if elapsed_ticks <= tick_count:
+                    continue
+                tick_count = elapsed_ticks
+                step = tick_count % len(patterns.SESSION_SEQUENCE)
                 tool, window = patterns.SESSION_SEQUENCE[step]
                 if tool != current_tool:
                     current_tool = tool
