@@ -586,8 +586,12 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     current_tool = patterns.SESSION_SEQUENCE[step][0]
     with protocol.Keyboard() as kb:
         set_keyboard_effect(current_tool)
-        kb.upload_animation(animation)
-        started_at = time.monotonic()
+        applied_at = []
+        kb.upload_animation(
+            animation,
+            on_apply=lambda: applied_at.append(time.monotonic()),
+        )
+        started_at = applied_at[-1]
         dwell = patterns.session_timing(animation.speed)[2] / 1000
         tick_count = 0
         next_colour_tick = 2
