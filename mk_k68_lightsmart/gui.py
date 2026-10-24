@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from . import image
 from . import layout as kb_layout
-from . import matrix, patterns, protocol, transport
+from . import matrix, patterns, protocol, transport, usage
 from .worker import DeviceThread
 
 # -- palette, sampled from the vendor screenshots -----------------------
@@ -882,6 +882,120 @@ class MatrixPage(QWidget):
         self.status.emit(f"imported {name} — {len(self.frames)} frames")
 
 
+class SessionsPage(QWidget):
+    """Live, four-stage plan-usage display for Claude Code and Codex."""
+
+    start_requested = Signal()
+    stop_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._connected = False
+        self._running = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(12)
+
+        card = Card()
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(18, 14, 18, 14)
+        inner.setSpacing(10)
+
+        title = QLabel("Sessions")
+        title.setStyleSheet("color:#cfe3ff; font-size:14px; font-weight:bold;")
+        inner.addWidget(title)
+
+        description = QLabel(
+            "Cycles through Claude 5h, Claude 7d, Codex 5h and Codex 7d. "
+            "The keyboard runs one looping animation, so the views change "
+            "without an upload or colored transition between them. The red "
+            "bar shows plan usage consumed."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
+        inner.addWidget(description)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        self.strip = DotMatrixStrip(cell=17)
+        row.addWidget(self.strip)
+        row.addStretch()
+        inner.addLayout(row)
+
+        self.stage = QLabel("Stopped")
+        self.stage.setAlignment(Qt.AlignCenter)
+        self.stage.setStyleSheet(
+            "color:#cfe3ff; font-size:14px; font-weight:bold;"
+        )
+        inner.addWidget(self.stage)
+
+        self.detail = QLabel(
+            "Start Sessions to load the four windows onto the keyboard."
+        )
+        self.detail.setAlignment(Qt.AlignCenter)
+        self.detail.setWordWrap(True)
+        self.detail.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
+        inner.addWidget(self.detail)
+
+        controls = QHBoxLayout()
+        controls.addStretch()
+        self.start_button = primary_button(
+            "Start sessions", self.start_requested.emit)
+        self.stop_button = ghost_button("Stop", self.stop_requested.emit)
+        self.stop_button.setEnabled(False)
+        controls.addWidget(self.start_button)
+        controls.addWidget(self.stop_button)
+        controls.addStretch()
+        inner.addLayout(controls)
+        lay.addWidget(card)
+
+        note = QLabel(
+            "Claude's 5h/7d values are read from WatchAI's local cache and "
+            "refresh when Claude Code next runs its WatchAI status line. "
+            "This app does not read Claude credentials or change Claude settings. "
+            "The displayed percentages are a snapshot from when the loop starts."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
+        lay.addWidget(note)
+        lay.addStretch()
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        self._sync_buttons()
+
+    def set_running(self, running: bool) -> None:
+        self._running = running
+        if not running:
+            self.stage.setText("Stopped")
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.start_button.setEnabled(self._connected and not self._running)
+        self.stop_button.setEnabled(self._running)
+
+    def show_screen(self, reading, window: str, frame: matrix.Frame) -> None:
+        self.strip.load_frame(frame)
+        percent = patterns.session_percent(reading, window)
+        service = "Claude" if reading.tool == "claude" else "Codex"
+        self.stage.setText(f"{service} · {window.upper()}")
+        if percent is None:
+            if reading.tool == "claude":
+                self.detail.setText(
+                    "No current Claude quota reading. WatchAI updates it "
+                    "when Claude Code runs its status line."
+                )
+            else:
+                self.detail.setText(
+                    "No current Codex quota reading. A recent Codex usage "
+                    "record is needed."
+                )
+        else:
+            period = "5-hour window" if window == "5h" else "weekly window"
+            self.detail.setText(f"{period}: {percent:.0f}% used · next screen in 3s")
+
+
 class LightPage(QWidget):
     """The built-in lighting animations, with their parameters.
 
@@ -1196,6 +1310,7 @@ class MainWindow(QMainWindow):
         ("❖", "Custom"),
         ("♫", "Music"),
         ("░", "Matrix"),
+        ("◷", "Sessions"),
     ]
 
     #: The chrome around the pages, which the opening size has to add
@@ -1218,6 +1333,16 @@ class MainWindow(QMainWindow):
         self._connected = False
         self._uploading = False
         self._close_after_upload = False
+        self._sessions_active = False
+        self._session_step = 0
+        self._session_readings = {}
+        self._session_current_frame = None
+        self._session_freeze_requested = False
+        self._session_timer = QTimer(self)
+        self._session_timer.setInterval(
+            patterns.SESSION_SECONDS_EACH * 1000)
+        self._session_timer.setSingleShot(True)
+        self._session_timer.timeout.connect(self.advance_sessions)
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -1247,13 +1372,17 @@ class MainWindow(QMainWindow):
         self.matrix_page.upload_requested.connect(self.start_upload)
         self.matrix_page.cancel_requested.connect(self.cancel_upload)
         self.matrix_page.status.connect(self.set_status)
+        self.sessions_page = SessionsPage()
+        self.sessions_page.start_requested.connect(self.start_sessions)
+        self.sessions_page.stop_requested.connect(
+            lambda: self.stop_sessions(freeze=True))
         # Imported here rather than at the top: the screens take this
         # module's chrome, so they can only be loaded once it exists.
         from . import screens
 
         self.keys_page = screens.KeysPage()
         self.keys_page.status.connect(self.set_status)
-        self.keys_page.write_requested.connect(self.request_keymap)
+        self.keys_page.write_requested.connect(self.write_keymap)
 
         self.custom_page = screens.CustomPage(lambda: self.colour)
         self.custom_page.status.connect(self.set_status)
@@ -1293,7 +1422,8 @@ class MainWindow(QMainWindow):
         built = {0: self._build_home(), 1: self.keys_page,
                  2: self.macro_page, 3: self.light_page,
                  4: self.profiles_page, 5: self.custom_page,
-                 6: self.music_page, 7: self.matrix_page}
+                 6: self.music_page, 7: self.matrix_page,
+                 8: self.sessions_page}
         for index in range(len(self.NAV)):
             self.pages.addWidget(
                 built.get(index) or self._build_placeholder(index))
@@ -1698,15 +1828,18 @@ class MainWindow(QMainWindow):
         self._connected = True
         self.upload_button.setEnabled(not self._uploading)
         self.matrix_page.set_connected(not self._uploading)
+        self.sessions_page.set_connected(not self._uploading)
         self.setup_page.refresh(path, True)
         self.set_status(f"connected — {path}", ok=True)
 
     def on_disconnected(self, why: str) -> None:
+        self.stop_sessions()
         self._connected = False
         if self._uploading:
             self._set_uploading(False)
         self.upload_button.setEnabled(False)
         self.matrix_page.set_connected(False)
+        self.sessions_page.set_connected(False)
         self.setup_page.refresh(why, False)
         self.set_status(
             f"{why} — plug it in by cable, wired mode, then press Setup",
@@ -1714,6 +1847,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        self.stop_sessions()
         if self._uploading:
             self._close_after_upload = True
             # Stop producers before waiting for the device worker. They
@@ -1739,6 +1873,7 @@ class MainWindow(QMainWindow):
 
     # -- home screen ----------------------------------------------------
     def on_key(self, key: kb_layout.Key) -> None:
+        self.stop_sessions()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             protocol.MODE_SINGLE_KEY, rgb, p8=key.light_index, p10=0x0F, p11=0x0F
@@ -1772,6 +1907,7 @@ class MainWindow(QMainWindow):
         next effect; the keymap outlives the power cycle. A caller that
         has not asked anybody should pass False.
         """
+        self.stop_sessions()
         from . import store as scheme_store
 
         scheme = scheme_store.shared().current
@@ -1791,8 +1927,13 @@ class MainWindow(QMainWindow):
         The worker coalesces these by key, so sending a whole board at
         once costs one request per key rather than one per repaint.
         """
+        self.stop_sessions()
         self.request_key.emit(
             light_index, colour.red(), colour.green(), colour.blue())
+
+    def write_keymap(self, entries, fn_layer: bool) -> None:
+        self.stop_sessions()
+        self.request_keymap.emit(entries, fn_layer)
 
     def on_key_applied(self, light_index: int, rgb: int) -> None:
         """Paint a key only once the keyboard has taken its colour."""
@@ -1822,8 +1963,12 @@ class MainWindow(QMainWindow):
     def upload_strip(self) -> None:
         self.start_upload(self.strip_animation())
 
-    def start_upload(self, animation) -> None:
+    def start_upload(self, animation, from_sessions: bool = False) -> None:
         """Send an animation, from whichever screen built it."""
+        if self._sessions_active and not from_sessions:
+            self.stop_sessions()
+        if not from_sessions:
+            self._session_freeze_requested = False
         try:
             blocks = animation.block_count()
         except ValueError as exc:
@@ -1836,6 +1981,75 @@ class MainWindow(QMainWindow):
             f"uploading {len(animation.frames)} frame(s), {blocks} blocks…"
         )
         self.request_upload.emit(animation)
+
+    def start_sessions(self) -> None:
+        """Upload one looping animation of the four quota windows."""
+        if not self._connected:
+            self.set_status("connect the keyboard before starting Sessions",
+                            ok=False)
+            return
+        self._session_readings = {
+            reading.tool: reading for reading in usage.read_all()
+        }
+        self._sessions_active = True
+        self._session_step = 0
+        self._session_freeze_requested = False
+        self.sessions_page.set_running(True)
+        tool, window = patterns.SESSION_SEQUENCE[self._session_step]
+        reading = (self._session_readings.get(tool)
+                   or usage.empty(tool))
+        self._session_current_frame = patterns.session_screen(reading, window)
+        self.sessions_page.show_screen(
+            reading, window, self._session_current_frame)
+        animation = patterns.session_animation(self._session_readings)
+        self.start_upload(animation, from_sessions=True)
+
+    def stop_sessions(self, freeze: bool = False) -> None:
+        """Stop the preview; optionally upload the current view as a still."""
+        if not self._sessions_active:
+            self._session_timer.stop()
+            return
+        self._sessions_active = False
+        self._session_timer.stop()
+        self.sessions_page.set_running(False)
+        if freeze and self._session_current_frame is not None:
+            if self._uploading:
+                self._session_freeze_requested = True
+                self.set_status("Sessions will freeze after the current upload")
+            elif self._connected:
+                self._upload_session_still()
+        else:
+            self.set_status(
+                "Sessions stopped — the keyboard keeps its current loop "
+                "until another effect is uploaded")
+
+    def advance_sessions(self) -> None:
+        """Advance the GUI preview; the keyboard loops the uploaded copy."""
+        if not self._sessions_active:
+            return
+        self._session_step = (self._session_step + 1) % len(
+            patterns.SESSION_SEQUENCE)
+        tool, window = patterns.SESSION_SEQUENCE[self._session_step]
+        reading = (self._session_readings.get(tool)
+                   or usage.empty(tool))
+        frame = patterns.session_screen(reading, window)
+        self._session_current_frame = frame
+        self.sessions_page.show_screen(reading, window, frame)
+        self._session_timer.start()
+
+    def _upload_session_still(self) -> None:
+        """Freeze the last previewed view with one still-frame upload."""
+        frame = self._session_current_frame
+        if frame is None or not self._connected:
+            return
+        self.start_upload(
+            matrix.Animation(
+                frames=[frame],
+                brightness=100,
+                speed=matrix.default_playback_speed(),
+            ),
+            from_sessions=True,
+        )
 
     def cancel_upload(self) -> None:
         # Through an Event, not the queue: an upload in progress is
@@ -1855,6 +2069,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setVisible(on)
         self.cancel_button.setEnabled(on)
         self.matrix_page.set_uploading(on, self._connected)
+        self.sessions_page.set_connected(self._connected and not on)
 
     def on_progress(self, sent: int, total: int) -> None:
         for bar in (self.upload_progress, self.matrix_page.upload_progress):
@@ -1866,10 +2081,16 @@ class MainWindow(QMainWindow):
         # The worker has already said what happened; this only hands the
         # controls back.
         self._set_uploading(False)
+        if self._session_freeze_requested:
+            self._session_freeze_requested = False
+            self._upload_session_still()
+        elif self._sessions_active:
+            self._session_timer.start()
         if self._close_after_upload:
             self.close()
 
     def apply_effect(self) -> None:
+        self.stop_sessions()
         mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
@@ -1891,6 +2112,7 @@ class MainWindow(QMainWindow):
         not, so they go out as the neutral values rather than as
         whatever the other screen was last set to.
         """
+        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{byte:02X}" for byte in protocol.data_frame(
@@ -1903,6 +2125,7 @@ class MainWindow(QMainWindow):
     def apply_light(self, mode: int, rgb: int, random_colour: int,
                     brightness: int, speed: int, direction: int) -> None:
         """The Light screen's own request, which carries a direction."""
+        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{b:02X}" for b in protocol.data_frame(

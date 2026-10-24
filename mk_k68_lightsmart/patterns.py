@@ -19,8 +19,11 @@ from .matrix import (
     LEDS,
     MAX_FRAMES_ANIMATION,
     ROWS,
+    Animation,
     Frame,
     default_playback_speed,
+    frame_ms,
+    speed_for_ms,
     speed_for_source,
 )
 
@@ -372,10 +375,71 @@ METER_COLOURS = {
 #: What a tool with nothing running is drawn in.
 METER_IDLE = (0x606060, 0x141414)
 
-#: Seconds each tool is meant to hold the strip. How many frames that
-#: is depends on how fast the firmware plays them, which is why it is
-#: the caller's to decide.
-METER_SECONDS_EACH = 3
+# The four Sessions views are loaded together and repeated in the uploaded
+# animation, so changing views does not trigger another transfer.
+SESSION_SECONDS_EACH = 3
+METER_SECONDS_EACH = SESSION_SECONDS_EACH
+SESSION_COLOUR = 0xFF0000
+SESSION_TRACK_COLOUR = 0x300000
+SESSION_FRAME_TARGET_MS = 1_000
+SESSION_SEQUENCE = (
+    ("claude", "5h"),
+    ("claude", "7d"),
+    ("codex", "5h"),
+    ("codex", "7d"),
+)
+
+
+def session_percent(reading, window: str) -> float | None:
+    """Used percentage for the short or long plan window."""
+    if window == "5h":
+        return reading.plan_percent
+    if window == "7d":
+        return reading.plan_long_percent
+    raise ValueError("session window is '5h' or '7d'")
+
+
+def session_screen(reading, window: str) -> Frame:
+    """One standard-colour quota screen with a percentage bar."""
+    from . import font
+
+    percent = session_percent(reading, window)
+    frame = Frame()
+    amount = "--" if percent is None else f"{percent:.0f}%"
+    label = f"{reading.tool.upper()} {window.upper()} {amount}"
+    font.draw_compact(frame, label, 1, SESSION_COLOUR)
+
+    filled = 0 if percent is None else round(COLS * percent / 100.0)
+    for col in range(COLS):
+        frame[col, ROWS - 1] = (
+            SESSION_COLOUR if col < filled else SESSION_TRACK_COLOUR)
+    return frame
+
+
+def session_animation(readings, brightness: int = 100,
+                      speed: int | None = None) -> Animation:
+    """Build one looping upload so view changes need no further transfers.
+
+    The keyboard only holds a frame for the time encoded in the speed byte,
+    so duplicate each view enough times to approach a three-second dwell.
+    Use a one-second frame pace by default to keep the animation upload small.
+    """
+    by_tool = ({reading.tool: reading for reading in readings}
+               if not isinstance(readings, dict) else readings)
+    play_speed = speed if speed is not None else speed_for_ms(
+        SESSION_FRAME_TARGET_MS)
+    per_view = max(1, round(
+        SESSION_SECONDS_EACH * 1000 / frame_ms(play_speed)))
+    per_view = min(per_view, MAX_FRAMES_ANIMATION // len(SESSION_SEQUENCE))
+
+    from .usage import empty
+
+    frames: list[Frame] = []
+    for tool, window in SESSION_SEQUENCE:
+        reading = by_tool.get(tool) or empty(tool)
+        screen = session_screen(reading, window)
+        frames.extend([screen] * per_view)
+    return Animation(frames=frames, brightness=brightness, speed=play_speed)
 
 
 def meter_screen(reading, label: str | None = None) -> Frame:

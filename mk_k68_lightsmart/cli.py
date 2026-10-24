@@ -553,6 +553,32 @@ def cmd_meter(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """Upload one self-cycling animation of the four plan windows."""
+    from . import patterns, usage
+
+    readings = {reading.tool: reading for reading in usage.read_all()}
+    animation = patterns.session_animation(
+        readings, brightness=args.brightness, speed=args.speed)
+
+    if args.dry_run:
+        for tool, window in patterns.SESSION_SEQUENCE:
+            percent = patterns.session_percent(
+                readings.get(tool) or usage.empty(tool), window)
+            amount = "--" if percent is None else f"{percent:.0f}%"
+            print(f"{tool:<7} {window.upper():>2}  {amount} used")
+        print(f"dry run - {len(animation.frames)} frame loop, nothing sent")
+        return 0
+
+    print("sessions: Claude 5h → Claude 7d → Codex 5h → Codex 7d")
+    print("uploading one looping animation; the keyboard changes screens "
+          "without another upload\n")
+    with protocol.Keyboard() as kb:
+        kb.upload_animation(animation)
+    print("session loop is running on the keyboard")
+    return 0
+
+
 def cmd_rotate(args: argparse.Namespace) -> int:
     """Put a different effect on the strip every few minutes.
 
@@ -965,6 +991,14 @@ def main(argv: list[str] | None = None) -> int:
                    help=speed_help())
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(func=cmd_meter)
+
+    ss = sub.add_parser(
+        "sessions", help="loop Claude and Codex 5h/7d limits on the strip")
+    ss.add_argument("--brightness", type=int, default=100, help="0-100")
+    ss.add_argument("--speed", type=int, default=None,
+                     help=speed_help())
+    ss.add_argument("--dry-run", action="store_true")
+    ss.set_defaults(func=cmd_sessions)
 
     ro = sub.add_parser(
         "rotate", help="change the effect every few minutes, while this runs")

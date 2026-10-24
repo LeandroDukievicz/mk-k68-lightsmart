@@ -1,19 +1,15 @@
 """What the AI coding tools on this machine have spent.
 
-Both Claude Code and Codex keep a transcript of every session on disk,
-and both record the token usage of each turn in it. Nothing here talks
-to a network or needs a login: it reads the newest transcript each tool
-has written and reports what is in it.
-
-What is available is not the same on both sides. Codex writes the plan's
-own rate-limit percentages into its rollouts; Claude Code does not write
-them anywhere local, so that field comes back ``None`` rather than being
-guessed at.
+Codex writes plan limits into its local rollouts. Claude Code passes its
+official percentages to WatchAI's status line, which stores a small,
+credential-free snapshot in WatchAI's config directory. Read that same
+snapshot here; never derive a quota from tokens or read Claude credentials.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +29,7 @@ CLAUDE_WINDOW_STEPS = (200_000, 500_000, 1_000_000)
 
 @dataclass(frozen=True)
 class Reading:
-    """One tool's current session, as far as its transcript shows."""
+    """One tool's current local usage reading."""
 
     tool: str
     #: what the session actually spent: new input, cache writes and
@@ -50,6 +46,7 @@ class Reading:
     #: when the transcript was last written
     updated: float
     source: Path | None
+    plan_long_window_minutes: int | None = None
 
     @property
     def found(self) -> bool:
@@ -104,7 +101,35 @@ def empty(tool: str) -> Reading:
                    plan_long_percent=None, updated=0.0, source=None)
 
 
-def claude_reading(root: Path | None = None) -> Reading:
+def watchai_claude_limits_path() -> Path:
+    """WatchAI's credential-free cache populated by Claude Code's status line."""
+    config_root = Path(os.environ.get("XDG_CONFIG_HOME")
+                       or Path.home() / ".config")
+    return config_root / "watchai" / "limits" / "claude.json"
+
+
+def _claude_rate_window(rate_limits: dict, name: str) -> float | None:
+    """A current Claude rate window, or none if absent or expired."""
+    row = rate_limits.get(name) or {}
+    used = _percent(row.get("used_percentage"))
+    try:
+        resets_at = float(row.get("resets_at"))
+    except (TypeError, ValueError):
+        return None
+    if used is None or resets_at <= time.time():
+        return None
+    return used
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def claude_reading(root: Path | None = None,
+                   limits_path: Path | None = None) -> Reading:
     """Claude Code's newest session.
 
     Tokens are summed over every assistant turn, counting new input,
@@ -116,8 +141,48 @@ def claude_reading(root: Path | None = None) -> Reading:
     holding when it answered.
     """
     path = _newest(root or CLAUDE_ROOT)
+    if limits_path is not None:
+        limit_paths = [limits_path]
+    elif root is not None:
+        limit_paths = [root / "claude-rate-limits.json"]
+    else:
+        # Reuse WatchAI's snapshot instead of configuring another status line
+        # or trying to infer plan usage from transcript token counts.
+        limit_paths = [watchai_claude_limits_path()]
+    limits: dict = {}
+    limit_updated = 0.0
+    limit_mtime = 0.0
+    for limit_path in limit_paths:
+        try:
+            saved = json.loads(limit_path.read_text(encoding="utf-8"))
+            candidate = saved.get("rate_limits") or {}
+            candidate_updated = float(
+                saved.get("updated") or saved.get("medido")
+                or limit_path.stat().st_mtime)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        candidate_five = _claude_rate_window(candidate, "five_hour")
+        candidate_week = _claude_rate_window(candidate, "seven_day")
+        if candidate_five is not None or candidate_week is not None:
+            limits = candidate
+            limit_updated = candidate_updated
+            limit_mtime = _mtime(limit_path)
+            break
+    plan = _claude_rate_window(limits, "five_hour")
+    plan_long = _claude_rate_window(limits, "seven_day")
+    plan_updated = max(limit_updated, limit_mtime)
+
     if path is None:
-        return empty("claude")
+        if plan is None and plan_long is None:
+            return empty("claude")
+        return Reading(
+            tool="claude", tokens=0, context=0, context_window=None,
+            plan_percent=plan,
+            plan_window_minutes=300 if plan is not None else None,
+            plan_long_percent=plan_long,
+            updated=plan_updated, source=None,
+            plan_long_window_minutes=10080 if plan_long is not None else None,
+        )
 
     total = 0
     context = 0
@@ -144,10 +209,11 @@ def claude_reading(root: Path | None = None) -> Reading:
 
     return Reading(
         tool="claude", tokens=total, context=context, context_window=window,
-        # Claude Code keeps no rate-limit figure on disk. Reporting one
-        # would mean inventing it.
-        plan_percent=None, plan_window_minutes=None, plan_long_percent=None,
-        updated=path.stat().st_mtime, source=path,
+        plan_percent=plan,
+        plan_window_minutes=300 if plan is not None else None,
+        plan_long_percent=plan_long,
+        updated=max(path.stat().st_mtime, plan_updated), source=path,
+        plan_long_window_minutes=10080 if plan_long is not None else None,
     )
 
 
@@ -192,6 +258,7 @@ def codex_reading(root: Path | None = None) -> Reading:
         plan_window_minutes=primary.get("window_minutes"),
         plan_long_percent=_percent(secondary.get("used_percent")),
         updated=path.stat().st_mtime, source=path,
+        plan_long_window_minutes=secondary.get("window_minutes"),
     )
 
 

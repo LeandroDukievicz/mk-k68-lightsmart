@@ -300,9 +300,32 @@ Useful for protocol work, since it sends one packet at a time.
 # walk the effect modes, recording what each one does
 ./mk-k68-lightsmart effect-scan
 
+# cycle Claude 5h, Claude 7d, Codex 5h and Codex 7d on the LED strip
+./mk-k68-lightsmart sessions
+
 # send anything, and optionally read the reply
 ./mk-k68-lightsmart raw "04 18" --read
 ```
+
+### Session limits on the strip
+
+`sessions` cycles through Claude's 5-hour and 7-day windows, then
+Codex's 5-hour and 7-day windows, for about three seconds each. It uploads
+one looping animation, so the keyboard switches views directly without a
+colored upload screen between them. The percentages and bars show usage
+already consumed, not usage remaining. Values are captured when the loop
+starts; run `sessions` again to refresh them. `./mk-k68-lightsmart sessions --dry-run`
+prints the four readings without connecting to the keyboard.
+
+Codex limits come from its local session records. Claude limits are read
+from the same cache WatchAI uses: `~/.config/watchai/limits/claude.json`
+(or `$XDG_CONFIG_HOME/watchai/limits/claude.json`). WatchAI's configured
+Claude Code status line writes the official 5h and 7d percentages there;
+`mk-k68-lightsmart` reads that credential-free snapshot directly and does
+not access Claude credentials or call a network service. The values update
+when Claude Code next runs its WatchAI status line. If the cache is missing
+or a window has expired, that screen shows `--` until WatchAI writes a fresh
+reading.
 
 ---
 
