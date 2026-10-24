@@ -59,33 +59,6 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
     ":": ("   ", " # ", "   ", " # ", "   "),
 }
 
-# A compact 3x4 face leaves the fifth row free for the Sessions progress
-# bar while retaining full-width labels across the 65-column strip.
-_COMPACT_GLYPHS: dict[str, tuple[str, ...]] = {
-    " ": ("   ", "   ", "   ", "   "),
-    "A": (" # ", "# #", "###", "# #"),
-    "C": (" ##", "#  ", "#  ", " ##"),
-    "D": ("## ", "# #", "# #", "## "),
-    "E": ("###", "#  ", "## ", "###"),
-    "H": ("# #", "# #", "###", "# #"),
-    "L": ("#  ", "#  ", "#  ", "###"),
-    "O": (" # ", "# #", "# #", " # "),
-    "U": ("# #", "# #", "# #", "###"),
-    "X": ("# #", " # ", "# #", "# #"),
-    "0": ("###", "# #", "# #", "###"),
-    "1": (" # ", "## ", " # ", "###"),
-    "2": ("###", "  #", " ##", "###"),
-    "3": ("###", " ##", "  #", "###"),
-    "4": ("# #", "# #", "###", "  #"),
-    "5": ("###", "#  ", "## ", "###"),
-    "6": ("###", "#  ", "###", "# #"),
-    "7": ("###", "  #", "  #", "  #"),
-    "8": ("###", "# #", "###", "# #"),
-    "9": ("###", "# #", "###", "  #"),
-    "%": ("# #", "  #", " # ", "#  "),
-    "-": ("   ", "###", "   ", "   "),
-}
-
 #: Anything with no glyph of its own is drawn as this.
 FALLBACK = ("###", "# #", "# #", "# #", "###")
 
@@ -123,19 +96,5 @@ def draw(frame: Frame, text: str, x: int, colour: int, *,
                     frame[at, row] = colour
                 elif dim is not None:
                     frame[at, row] = dim
-        column += ADVANCE
-    return column - 1
-
-
-def draw_compact(frame: Frame, text: str, x: int, colour: int) -> int:
-    """Draw a 3x4 label, leaving the bottom row free for a meter bar."""
-    column = x
-    for character in text:
-        rows = _COMPACT_GLYPHS.get(character.upper(), FALLBACK[:4])
-        for row, marks in enumerate(rows):
-            for offset, mark in enumerate(marks):
-                at = column + offset
-                if mark != " " and 0 <= at < COLS:
-                    frame[at, row] = colour
         column += ADVANCE
     return column - 1

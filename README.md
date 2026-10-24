@@ -313,9 +313,11 @@ Useful for protocol work, since it sends one packet at a time.
 Codex's 5-hour and 7-day windows, for about three seconds each. It uploads
 one looping animation, so the keyboard switches views directly without a
 colored upload screen between them. The percentages and bars show usage
-already consumed, not usage remaining. Values are captured when the loop
-starts; run `sessions` again to refresh them. `./mk-k68-lightsmart sessions --dry-run`
-prints the four readings without connecting to the keyboard.
+already consumed, not usage remaining. Claude is orange and Codex light blue;
+each bar is placed after the full-size label. Values are captured when the
+loop starts; run `sessions` again to refresh them. `./mk-k68-lightsmart sessions --dry-run`
+prints the four readings without connecting to the keyboard. Session displays
+use the visor strip and leave the keyboard key-lighting effects independent.
 
 Codex limits come from its local session records. Claude limits are read
 from the same cache WatchAI uses: `~/.config/watchai/limits/claude.json`

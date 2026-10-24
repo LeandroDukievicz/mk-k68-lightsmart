@@ -379,8 +379,10 @@ METER_IDLE = (0x606060, 0x141414)
 # animation, so changing views does not trigger another transfer.
 SESSION_SECONDS_EACH = 3
 METER_SECONDS_EACH = SESSION_SECONDS_EACH
-SESSION_COLOUR = 0xFF0000
-SESSION_TRACK_COLOUR = 0x300000
+SESSION_COLOURS = {
+    "claude": (0xFF7A1A, 0x3A1A00),
+    "codex": (0x63BFFF, 0x102B3D),
+}
 SESSION_FRAME_TARGET_MS = 1_000
 SESSION_SEQUENCE = (
     ("claude", "5h"),
@@ -400,19 +402,24 @@ def session_percent(reading, window: str) -> float | None:
 
 
 def session_screen(reading, window: str) -> Frame:
-    """One standard-colour quota screen with a percentage bar."""
+    """One quota screen with text followed by its service-coloured bar."""
     from . import font
 
     percent = session_percent(reading, window)
     frame = Frame()
+    bright, dim = SESSION_COLOURS.get(reading.tool, (0xFFFFFF, 0x202020))
     amount = "--" if percent is None else f"{percent:.0f}%"
     label = f"{reading.tool.upper()} {window.upper()} {amount}"
-    font.draw_compact(frame, label, 1, SESSION_COLOUR)
+    font.draw(frame, label, 1, bright)
 
-    filled = 0 if percent is None else round(COLS * percent / 100.0)
-    for col in range(COLS):
-        frame[col, ROWS - 1] = (
-            SESSION_COLOUR if col < filled else SESSION_TRACK_COLOUR)
+    # Keep the full 3x5 lettering intact; the meter starts after the text.
+    bar_start = 2 + font.width(label)
+    bar_width = max(0, COLS - bar_start)
+    filled = 0 if percent is None else round(bar_width * percent / 100.0)
+    for col in range(bar_start, COLS):
+        colour = bright if col - bar_start < filled else dim
+        for row in range(ROWS):
+            frame[col, row] = colour
     return frame
 
 

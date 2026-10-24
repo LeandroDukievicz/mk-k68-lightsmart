@@ -909,8 +909,9 @@ class SessionsPage(QWidget):
         description = QLabel(
             "Cycles through Claude 5h, Claude 7d, Codex 5h and Codex 7d. "
             "The keyboard runs one looping animation, so the views change "
-            "without an upload or colored transition between them. The red "
-            "bar shows plan usage consumed."
+            "without an upload or colored transition between them. Claude "
+            "is orange and Codex light blue; each usage bar follows its text. "
+            "Key-lighting effects remain independent."
         )
         description.setWordWrap(True)
         description.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
@@ -1382,7 +1383,7 @@ class MainWindow(QMainWindow):
 
         self.keys_page = screens.KeysPage()
         self.keys_page.status.connect(self.set_status)
-        self.keys_page.write_requested.connect(self.write_keymap)
+        self.keys_page.write_requested.connect(self.request_keymap)
 
         self.custom_page = screens.CustomPage(lambda: self.colour)
         self.custom_page.status.connect(self.set_status)
@@ -1873,7 +1874,6 @@ class MainWindow(QMainWindow):
 
     # -- home screen ----------------------------------------------------
     def on_key(self, key: kb_layout.Key) -> None:
-        self.stop_sessions()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
             protocol.MODE_SINGLE_KEY, rgb, p8=key.light_index, p10=0x0F, p11=0x0F
@@ -1907,7 +1907,6 @@ class MainWindow(QMainWindow):
         next effect; the keymap outlives the power cycle. A caller that
         has not asked anybody should pass False.
         """
-        self.stop_sessions()
         from . import store as scheme_store
 
         scheme = scheme_store.shared().current
@@ -1927,13 +1926,8 @@ class MainWindow(QMainWindow):
         The worker coalesces these by key, so sending a whole board at
         once costs one request per key rather than one per repaint.
         """
-        self.stop_sessions()
         self.request_key.emit(
             light_index, colour.red(), colour.green(), colour.blue())
-
-    def write_keymap(self, entries, fn_layer: bool) -> None:
-        self.stop_sessions()
-        self.request_keymap.emit(entries, fn_layer)
 
     def on_key_applied(self, light_index: int, rgb: int) -> None:
         """Paint a key only once the keyboard has taken its colour."""
@@ -2090,7 +2084,6 @@ class MainWindow(QMainWindow):
             self.close()
 
     def apply_effect(self) -> None:
-        self.stop_sessions()
         mode = self.effect_box.currentData()
         rgb = (self.colour.red(), self.colour.green(), self.colour.blue())
         frame = protocol.data_frame(
@@ -2112,7 +2105,6 @@ class MainWindow(QMainWindow):
         not, so they go out as the neutral values rather than as
         whatever the other screen was last set to.
         """
-        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{byte:02X}" for byte in protocol.data_frame(
@@ -2125,7 +2117,6 @@ class MainWindow(QMainWindow):
     def apply_light(self, mode: int, rgb: int, random_colour: int,
                     brightness: int, speed: int, direction: int) -> None:
         """The Light screen's own request, which carries a direction."""
-        self.stop_sessions()
         name = protocol.EFFECT_BY_MODE.get(mode)
         self.last_packet.setText(" ".join(
             f"{b:02X}" for b in protocol.data_frame(
