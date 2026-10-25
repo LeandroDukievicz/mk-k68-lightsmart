@@ -911,9 +911,9 @@ class SessionsPage(QWidget):
         description = QLabel(
             "Cycles through Claude 5h, Claude 7d, Codex 5h and Codex 7d. "
             "The keyboard runs one looping animation, so the views change "
-            "without an upload between them. Starting this also runs the "
-            "keyboard's Falling effect: orange for Claude and blue for Codex. "
-            "Each usage bar follows its full-size text; unused visor LEDs stay black."
+            "without an upload between them. Each usage bar follows its "
+            "full-size text; unused visor LEDs stay black. Key-lighting "
+            "effects remain independent."
         )
         description.setWordWrap(True)
         description.setStyleSheet(f"color:{MUTED.name()}; font-size:11px;")
@@ -934,7 +934,7 @@ class SessionsPage(QWidget):
         inner.addWidget(self.stage)
 
         self.detail = QLabel(
-            "Start falling-sessions to sync the visor and keyboard lights."
+            "Start Sessions to load the four windows onto the keyboard."
         )
         self.detail.setAlignment(Qt.AlignCenter)
         self.detail.setWordWrap(True)
@@ -944,7 +944,7 @@ class SessionsPage(QWidget):
         controls = QHBoxLayout()
         controls.addStretch()
         self.start_button = primary_button(
-            "Start falling-sessions", self.start_requested.emit)
+            "Start sessions", self.start_requested.emit)
         self.stop_button = ghost_button("Stop", self.stop_requested.emit)
         self.stop_button.setEnabled(False)
         controls.addWidget(self.start_button)
@@ -982,7 +982,7 @@ class SessionsPage(QWidget):
         self.strip.load_frame(frame)
         percent = patterns.session_percent(reading, window)
         service = "Claude" if reading.tool == "claude" else "Codex"
-        self.stage.setText(f"{service} · {window.upper()} · FALLING")
+        self.stage.setText(f"{service} · {window.upper()}")
         if percent is None:
             if reading.tool == "claude":
                 self.detail.setText(
@@ -1138,14 +1138,6 @@ class LightPage(QWidget):
 
     def refresh_colour(self) -> None:
         """Refresh the preview after the shared Home color changes."""
-        self._update_colour_controls()
-
-    def select_effect_colour(self, mode: int, rgb: tuple[int, int, int]) -> None:
-        """Reflect an effect/color selected by an automatic lighting mode."""
-        effect = protocol.EFFECT_BY_MODE[mode]
-        self.effects.setCurrentRow(protocol.EFFECTS.index(effect))
-        self.random_colour.setChecked(False)
-        self._chosen_colour = QColor(*rgb)
         self._update_colour_controls()
 
     def pick_colour(self) -> None:
@@ -1345,15 +1337,12 @@ class MainWindow(QMainWindow):
         self._uploading = False
         self._close_after_upload = False
         self._sessions_active = False
-        self._sessions_falling = False
-        self._session_effect_started = False
         self._session_step = 0
         self._session_tick_count = 0
         self._session_dwell_ms = 0.0
         self._session_started_at = None
         self._session_upload_pending = False
         self._session_upload_applied_at = None
-        self._session_effect_tool = None
         self._session_readings = {}
         self._session_current_frame = None
         self._session_freeze_requested = False
@@ -1361,12 +1350,6 @@ class MainWindow(QMainWindow):
         self._session_timer.setSingleShot(True)
         self._session_timer.setTimerType(Qt.PreciseTimer)
         self._session_timer.timeout.connect(self.advance_sessions)
-        self._session_effect_timer = QTimer(self)
-        self._session_effect_timer.setSingleShot(True)
-        self._session_effect_timer.setTimerType(Qt.PreciseTimer)
-        self._session_effect_timer.timeout.connect(
-            self.advance_session_effect)
-        self._session_next_effect_tick = 2
 
         root = QWidget()
         root.setStyleSheet(f"background: {BG.name()};")
@@ -1858,7 +1841,7 @@ class MainWindow(QMainWindow):
         self.set_status(f"connected — {path}", ok=True)
 
     def on_disconnected(self, why: str) -> None:
-        self.stop_sessions(restore_keyboard=False)
+        self.stop_sessions()
         self._connected = False
         if self._uploading:
             self._set_uploading(False)
@@ -2004,7 +1987,7 @@ class MainWindow(QMainWindow):
         self.request_upload.emit(animation)
 
     def start_sessions(self) -> None:
-        """Start visor quota views and the synchronized keyboard Falling mode."""
+        """Start the visor quota views without changing key lighting."""
         if not self._connected:
             self.set_status("connect the keyboard before starting Sessions",
                             ok=False)
@@ -2014,18 +1997,13 @@ class MainWindow(QMainWindow):
         }
         animation = patterns.session_animation(self._session_readings)
         self._sessions_active = True
-        self._sessions_falling = True
-        self._session_effect_started = False
         self._session_step = 0
         self._session_tick_count = 0
         self._session_dwell_ms = patterns.session_timing(animation.speed)[2]
         self._session_started_at = None
         self._session_upload_pending = True
         self._session_upload_applied_at = None
-        self._session_effect_tool = "claude"
-        self._session_next_effect_tick = 2
         self._session_timer.stop()
-        self._session_effect_timer.stop()
         self._session_freeze_requested = False
         self.sessions_page.set_running(True)
         tool, window = patterns.SESSION_SEQUENCE[self._session_step]
@@ -2034,28 +2012,18 @@ class MainWindow(QMainWindow):
         self._session_current_frame = patterns.session_screen(reading, window)
         self.sessions_page.show_screen(
             reading, window, self._session_current_frame)
-        self._set_session_keyboard_effect("claude")
-        self._session_effect_started = True
         self.start_upload(animation, from_sessions=True)
 
-    def stop_sessions(self, freeze: bool = False,
-                      restore_keyboard: bool = True) -> None:
-        """Stop synchronization and optionally freeze the visor's current view."""
+    def stop_sessions(self, freeze: bool = False) -> None:
+        """Stop the visor preview and optionally freeze its current view."""
         if not self._sessions_active:
             self._session_timer.stop()
             return
         self._sessions_active = False
         self._session_timer.stop()
-        self._session_effect_timer.stop()
         self._session_started_at = None
         self._session_upload_pending = False
         self.sessions_page.set_running(False)
-        if (self._sessions_falling and self._session_effect_started
-                and restore_keyboard and self._connected):
-            self._set_session_keyboard_effect(
-                self._session_effect_tool or "claude", mode="Static")
-        self._sessions_falling = False
-        self._session_effect_started = False
         if freeze and self._session_current_frame is not None:
             if self._uploading:
                 self._session_freeze_requested = True
@@ -2064,20 +2032,8 @@ class MainWindow(QMainWindow):
                 self._upload_session_still()
         else:
             self.set_status(
-                "Falling color sync stopped — the visor loop stays loaded "
-                "until another animation is uploaded")
-
-    def _set_session_keyboard_effect(self, tool: str, mode: str = "Falling") -> None:
-        """Set the key backlight to the same service color as the visor."""
-        effect = protocol.EFFECT_BY_NAME[mode.lower()]
-        rgb = patterns.session_colour_rgb(tool)
-        self.light_page.select_effect_colour(effect.mode, rgb)
-        self.request_effect.emit(
-            effect.mode, *rgb, 0,
-            self.light_page.sliders["brightness"].value(),
-            self.light_page.sliders["speed"].value(),
-            self.light_page.sliders["direction"].value(),
-        )
+                "Sessions stopped — the visor loop stays loaded until "
+                "another animation is uploaded")
 
     def advance_sessions(self) -> None:
         """Follow the uploaded loop's precise frame schedule."""
@@ -2097,47 +2053,6 @@ class MainWindow(QMainWindow):
         self._session_current_frame = frame
         self.sessions_page.show_screen(reading, window, frame)
         self._schedule_session_tick()
-
-    def advance_session_effect(self) -> None:
-        """Queue color before the visor boundary by the USB apply latency."""
-        if not self._sessions_active or self._session_started_at is None:
-            return
-        tick = self._session_next_effect_tick
-        deadline = (self._session_started_at +
-                    tick * self._session_dwell_ms / 1000 -
-                    protocol.EFFECT_APPLY_LEAD_SECONDS)
-        now = time.monotonic()
-        if now < deadline:
-            delay_ms = max(1, math.ceil((deadline - now) * 1000))
-            self._session_effect_timer.start(delay_ms)
-            return
-
-        elapsed_tick = int(
-            (now - self._session_started_at) * 1000 /
-            self._session_dwell_ms)
-        target_tick = tick if elapsed_tick < tick + 2 else elapsed_tick
-        tool = patterns.SESSION_SEQUENCE[
-            target_tick % len(patterns.SESSION_SEQUENCE)][0]
-        if tool != self._session_effect_tool:
-            self._session_effect_tool = tool
-            self._set_session_keyboard_effect(tool)
-        self._session_next_effect_tick = (
-            tick + 2 if elapsed_tick < tick + 2
-            else (elapsed_tick // 2 + 1) * 2
-        )
-        self._schedule_session_effect_change()
-
-    def _schedule_session_effect_change(self) -> None:
-        """Dispatch key color early enough to commit at the screen boundary."""
-        if not self._sessions_active or self._session_started_at is None:
-            return
-        deadline = (self._session_started_at +
-                    self._session_next_effect_tick *
-                    self._session_dwell_ms / 1000 -
-                    protocol.EFFECT_APPLY_LEAD_SECONDS)
-        delay_ms = max(
-            1, math.ceil((deadline - time.monotonic()) * 1000))
-        self._session_effect_timer.start(delay_ms)
 
     def _schedule_session_tick(self) -> None:
         """Schedule against the loop start so event handling cannot drift."""
@@ -2197,11 +2112,7 @@ class MainWindow(QMainWindow):
             self._upload_session_still()
         elif self._sessions_active:
             if not ok:
-                if self._session_effect_started and self._connected:
-                    self._set_session_keyboard_effect("claude", mode="Static")
                 self._sessions_active = False
-                self._sessions_falling = False
-                self._session_effect_started = False
                 self._session_upload_pending = False
                 self.sessions_page.set_running(False)
             else:
@@ -2216,18 +2127,12 @@ class MainWindow(QMainWindow):
                 self._session_step = self._session_tick_count % len(
                     patterns.SESSION_SEQUENCE)
                 tool, window = patterns.SESSION_SEQUENCE[self._session_step]
-                if tool != self._session_effect_tool:
-                    self._session_effect_tool = tool
-                    self._set_session_keyboard_effect(tool)
-                self._session_next_effect_tick = (
-                    (self._session_tick_count // 2) + 1) * 2
                 reading = (self._session_readings.get(tool)
                            or usage.empty(tool))
                 frame = patterns.session_screen(reading, window)
                 self._session_current_frame = frame
                 self.sessions_page.show_screen(reading, window, frame)
                 self._schedule_session_tick()
-                self._schedule_session_effect_change()
         if self._close_after_upload:
             self.close()
 

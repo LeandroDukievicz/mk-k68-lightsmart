@@ -413,12 +413,6 @@ def session_percent(reading, window: str) -> float | None:
     raise ValueError("session window is '5h' or '7d'")
 
 
-def session_colour_rgb(tool: str) -> tuple[int, int, int]:
-    """The bright display color, as RGB for the keyboard's Falling mode."""
-    packed = SESSION_COLOURS.get(tool, (0xFFFFFF, 0))[0]
-    return ((packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF)
-
-
 def session_screen(reading, window: str) -> Frame:
     """One quota screen with text followed by its service-coloured bar."""
     from . import font

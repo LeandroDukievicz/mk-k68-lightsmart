@@ -22,12 +22,6 @@ def hexs(data: bytes, n: int = 16) -> str:
 
 
 class ControlFraming(unittest.TestCase):
-    def test_session_effect_lead_covers_six_paced_reports(self):
-        self.assertAlmostEqual(
-            protocol.EFFECT_APPLY_LEAD_SECONDS,
-            6 * transport.PACING,
-        )
-
     def test_begin_matches_driver(self):
         # 0x416F6D: mov word [buf], 0x1804
         self.assertEqual(hexs(protocol.control(protocol.SUB_BEGIN), 4), "04 18 00 00")

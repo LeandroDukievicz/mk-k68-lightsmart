@@ -41,7 +41,6 @@ from .transport import (
     ACK_RETRY,
     ACK_STUCK,
     FLUSH_PACING,
-    PACING,
     REPORT_SIZE,
     DeviceGone,
     KT68Transport,
@@ -81,10 +80,6 @@ SUB_READ_FRAME = 0xF5    #: read the keys' live frame back (byte 8 = 0x09)
 #: Byte 0 of a data frame when the frame sets one key's colour outright
 #: instead of selecting a built-in animation.
 MODE_SINGLE_KEY = 0x80
-
-# begin/write+ack, select/write+ack, data/write, and apply/write. Queue a
-# synchronized color change this far before the visor's next view boundary.
-EFFECT_APPLY_LEAD_SECONDS = 6 * PACING
 
 FRAME_MAGIC = (0xAA, 0x55)
 FRAME_SIZE = 16

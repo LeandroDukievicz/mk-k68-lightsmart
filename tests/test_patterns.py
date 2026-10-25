@@ -28,10 +28,6 @@ class SessionScreens(unittest.TestCase):
         return SimpleNamespace(
             tool=tool, plan_percent=50.0, plan_long_percent=50.0)
 
-    def test_session_palette_is_shared_with_keyboard_effect(self):
-        self.assertEqual(patterns.session_colour_rgb("claude"), (255, 122, 26))
-        self.assertEqual(patterns.session_colour_rgb("codex"), (26, 95, 180))
-
     def test_empty_glyph_spaces_and_unfilled_bar_are_black(self):
         claude = patterns.session_screen(self.reading("claude"), "5h")
         codex = patterns.session_screen(self.reading("codex"), "5h")
